@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Robot Controller — Minimal Nano / Legacy Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:#0b1118; --panel:#121a24; --panel2:#182230; --line:#243446; --line2:#34495f;
+  --text:#e6edf5; --dim:#8da3bc; --faint:#5b6f88; --accent:#00d9ff;
+  --ok:#34d399; --warn:#ffb020; --bad:#ff5470; --roll:#b388ff;
+  --shadow:0 1px 0 rgba(255,255,255,.04) inset,0 10px 28px rgba(0,0,0,.32);
+  --radius:10px; --radius-sm:6px;
+}
+*{box-sizing:border-box} html,body{min-height:100%}
+body{margin:0;background:radial-gradient(1000px 520px at 80% -20%,rgba(0,217,255,.07),transparent 60%),radial-gradient(800px 520px at -10% 110%,rgba(179,136,255,.06),transparent 60%),var(--bg);color:var(--text);font-family:'DM Sans',system-ui,sans-serif;font-size:14px;line-height:1.45}
+h1,h2,h3{font-family:'Chakra Petch',sans-serif;margin:0 0 8px 0;letter-spacing:.06em} h1{font-size:20px} h2{font-size:13px;text-transform:uppercase;color:var(--dim);letter-spacing:.18em} h3{font-size:11px;text-transform:uppercase;color:var(--faint);letter-spacing:.16em;margin-top:10px}
+code,.mono{font-family:'JetBrains Mono',monospace;font-size:12px}.tiny{font-size:11px}.muted{color:var(--dim)}.hidden{display:none!important}
+.appbar{position:sticky;top:0;z-index:50;display:flex;gap:14px;align-items:center;padding:12px 20px;background:rgba(11,17,24,.9);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.brand{font-family:'Chakra Petch',sans-serif;text-transform:uppercase;letter-spacing:.1em;font-weight:700;display:flex;align-items:center;gap:10px}.dot{width:10px;height:10px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 4px rgba(0,217,255,.15),0 0 18px var(--accent)}.spacer{flex:1}
+.tabs{display:inline-flex;gap:2px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:3px}.tabs button{background:transparent;border:0;color:var(--dim);padding:7px 12px;border-radius:6px;font-family:'Chakra Petch',sans-serif;text-transform:uppercase;letter-spacing:.1em;font-size:11px;cursor:pointer}.tabs button.active{background:var(--accent);color:#001218;font-weight:700}
+.status-pill{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:999px;background:var(--panel);padding:6px 12px;font-size:12px}.led{width:8px;height:8px;border-radius:50%;background:var(--faint)}.status-pill.ok .led{background:var(--ok);box-shadow:0 0 12px var(--ok)}.status-pill.warn .led{background:var(--warn);box-shadow:0 0 12px var(--warn)}.status-pill.bad .led{background:var(--bad);box-shadow:0 0 12px var(--bad)}
+.container{padding:16px 20px 72px}.grid{display:grid;gap:16px}.cols-3{grid-template-columns:1.05fr 1fr 1fr}.cols-2{grid-template-columns:1.2fr 1fr}@media(max-width:1150px){.cols-3,.cols-2{grid-template-columns:1fr}}.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;box-shadow:var(--shadow)}.card .head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}.row-inline{display:flex;gap:8px;align-items:end;flex-wrap:wrap}
+label{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:.14em}input,select,textarea{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:var(--radius-sm);padding:8px 10px;font-family:'JetBrains Mono',monospace;font-size:12px}textarea{width:100%;min-height:190px;resize:vertical;background:#07101a;color:#b7e3ff}input:focus,select:focus,textarea:focus{outline:0;border-color:var(--accent)}
+.btn{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:var(--radius-sm);padding:8px 12px;font:inherit;font-family:'Chakra Petch',sans-serif;letter-spacing:.08em;text-transform:uppercase;font-size:12px;cursor:pointer}.btn:hover:not(:disabled){border-color:var(--accent)}.btn:disabled{opacity:.42;cursor:not-allowed}.btn.primary{background:var(--accent);color:#001218;border-color:var(--accent);font-weight:700}.btn.warn{color:var(--warn);border-color:rgba(255,176,32,.45)}.btn.danger{color:var(--bad);border-color:rgba(255,84,112,.45)}.btn.roll{color:var(--roll);border-color:rgba(179,136,255,.45)}
+.metrics{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}.metric{background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:10px}.metric .k{font-size:10px;text-transform:uppercase;color:var(--faint);letter-spacing:.16em}.metric .v{font-family:'JetBrains Mono',monospace;font-size:16px;margin-top:4px}.ok{color:var(--ok)}.warnc{color:var(--warn)}.badc{color:var(--bad)}.dim{color:var(--dim)}
+.banner{border:1px solid var(--line);border-left:3px solid var(--accent);background:var(--panel2);border-radius:8px;padding:9px 11px;color:var(--dim);font-size:12px;margin:8px 0}.banner.ok{border-left-color:var(--ok)}.banner.warn{border-left-color:var(--warn);color:var(--warn)}.banner.bad{border-left-color:var(--bad);color:var(--bad)}
+.dpad{display:grid;grid-template-columns:1fr 1fr 1fr;grid-template-rows:68px 68px 68px;gap:8px;max-width:310px;margin:12px auto}.dpad button{background:var(--panel2);border:1px solid var(--line);border-radius:10px;color:var(--text);font-family:'Chakra Petch',sans-serif;text-transform:uppercase;letter-spacing:.08em;cursor:pointer}.dpad button:hover:not(:disabled){color:var(--accent);border-color:var(--accent)}.dpad .up{grid-column:2}.dpad .left{grid-column:1;grid-row:2}.dpad .stop{grid-column:2;grid-row:2;background:var(--bad);border-color:var(--bad);color:white}.dpad .right{grid-column:3;grid-row:2}.dpad .down{grid-column:2;grid-row:3}.key{display:block;font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--faint);text-transform:none;letter-spacing:0}.arrow{display:block;font-size:22px;line-height:1}
+.cmd-list{display:flex;gap:6px;flex-wrap:wrap}.token{font-family:'JetBrains Mono',monospace;font-size:11px;background:rgba(0,217,255,.11);color:var(--accent);border:1px solid rgba(0,217,255,.22);padding:3px 7px;border-radius:999px}.token.legacy{background:rgba(179,136,255,.11);color:var(--roll);border-color:rgba(179,136,255,.25)}.token.off{background:rgba(141,163,188,.09);color:var(--faint);border-color:var(--line)}
+table{width:100%;border-collapse:collapse;font-size:12px}th{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);color:var(--faint);font-size:10px;text-transform:uppercase;letter-spacing:.14em;position:sticky;top:0;background:var(--panel)}td{padding:7px 6px;border-bottom:1px solid var(--line);font-family:'JetBrains Mono',monospace;vertical-align:top}.table-wrap{max-height:315px;overflow:auto;border:1px solid var(--line);border-radius:6px}tr.clickable{cursor:pointer}tr.clickable:hover td{background:var(--panel2)}.chip{display:inline-block;border-radius:4px;padding:2px 7px;font-family:'Chakra Petch',sans-serif;text-transform:uppercase;letter-spacing:.08em;font-size:10px}.queued{background:rgba(255,176,32,.15);color:var(--warn)}.claimed,.executing{background:rgba(0,217,255,.15);color:var(--accent)}.completed{background:rgba(52,211,153,.15);color:var(--ok)}.failed,.expired{background:rgba(255,84,112,.15);color:var(--bad)}.cancelled{background:rgba(141,163,188,.15);color:var(--dim)}.rolledback{background:rgba(179,136,255,.15);color:var(--roll)}
+.modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.62);z-index:100;display:none;align-items:center;justify-content:center}.modal-backdrop.open{display:flex}.modal{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px;max-width:780px;width:92%;max-height:82vh;overflow:auto;box-shadow:0 32px 80px rgba(0,0,0,.6)}pre{background:#07101a;border:1px solid var(--line);border-radius:6px;color:#b7e3ff;padding:12px;white-space:pre-wrap;word-break:break-word;font-family:'JetBrains Mono',monospace;font-size:11px}
+.toast-stack{position:fixed;right:20px;bottom:20px;z-index:200;display:flex;flex-direction:column;gap:8px}.toast{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:6px;padding:10px 13px;box-shadow:var(--shadow);font-size:12px;max-width:390px}.toast.ok{border-left-color:var(--ok)}.toast.warn{border-left-color:var(--warn)}.toast.error{border-left-color:var(--bad)}.log{background:#07101a;border:1px solid var(--line);border-radius:6px;color:#6ed4ff;font-family:'JetBrains Mono',monospace;font-size:11px;max-height:220px;overflow:auto;padding:10px;white-space:pre-wrap}.form-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.form-grid > div{min-width:0}.form-grid input,.form-grid select{width:100%}@media(max-width:720px){.form-grid{grid-template-columns:1fr 1fr}.metrics{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header class="appbar">
+  <div class="brand"><span class="dot"></span> Robot Controller</div>
+  <div class="spacer"></div>
+  <div class="tabs" id="viewTabs">
+    <button data-view="status" class="active">Status</button>
+    <button data-view="live">Live</button>
+    <button data-view="grid">Grid</button>
+    <button data-view="workflow">Commandsets</button>
+    <button data-view="history">History</button>
+  </div>
+  <div class="status-pill" id="apiPill"><span class="led"></span><span id="apiText">Disconnected</span></div>
+</header>
+<main class="container">
+  <section class="card" style="margin-bottom:16px">
+    <div class="head"><h2>Connection</h2><span class="tiny muted">Frontend uses Basic Auth. Nano uses device credentials separately.</span></div>
+    <div class="row-inline">
+      <div><label>Email</label><br><input id="email" value="admin@test.com" style="width:210px"></div>
+      <div><label>Password</label><br><input id="password" type="password" value="<REDACTED-PASSWORD>" style="width:180px"></div>
+      <div><label>Device</label><br><select id="deviceSelect" style="width:290px"><option value="1">Device 1</option></select></div>
+      <div><label>Device ID</label><br><input id="deviceId" type="number" value="1" style="width:90px"></div>
+      <button class="btn primary" id="saveBtn">Save & Refresh</button>
+      <button class="btn" id="refreshBtn">Refresh</button>
+    </div>
+  </section>
+
+  <section id="statusView" class="view grid cols-3">
+    <div class="card">
+      <div class="head"><h2>Selected Device</h2><span class="chip" id="profileChip">—</span></div>
+      <div class="metrics">
+        <div class="metric"><div class="k">Name</div><div class="v" id="dName">—</div></div>
+        <div class="metric"><div class="k">Identifier</div><div class="v" id="dIdent">—</div></div>
+        <div class="metric"><div class="k">Type</div><div class="v" id="dType">—</div></div>
+        <div class="metric"><div class="k">Map</div><div class="v" id="dMap">—</div></div>
+      </div>
+      <h3>Capabilities</h3>
+      <div class="cmd-list" id="capabilityTokens"></div>
+    </div>
+    <div class="card">
+      <div class="head"><h2>Grid Pose</h2><span class="chip" id="trustChip">—</span></div>
+      <div class="metrics">
+        <div class="metric"><div class="k">X</div><div class="v" id="poseX">—</div></div>
+        <div class="metric"><div class="k">Y</div><div class="v" id="poseY">—</div></div>
+        <div class="metric"><div class="k">Facing</div><div class="v" id="poseFacing">—</div></div>
+        <div class="metric"><div class="k">Confidence</div><div class="v" id="poseConfidence">—</div></div>
+      </div>
+      <div class="banner" id="poseMessage">No status loaded.</div>
+    </div>
+    <div class="card">
+      <div class="head"><h2>Work Summary</h2></div>
+      <div class="metrics">
+        <div class="metric"><div class="k">Queued Jobs</div><div class="v" id="sumQueuedJobs">0</div></div>
+        <div class="metric"><div class="k">Active Jobs</div><div class="v" id="sumActiveJobs">0</div></div>
+        <div class="metric"><div class="k">Queued Workflows</div><div class="v" id="sumQueuedWf">0</div></div>
+        <div class="metric"><div class="k">Active Workflows</div><div class="v" id="sumActiveWf">0</div></div>
+      </div>
+      <div class="banner ok">Nano workflows are now backend-dispatched one job at a time. This page intentionally does not use telemetry.</div>
+    </div>
+  </section>
+
+  <section id="liveView" class="view hidden grid cols-2">
+    <div class="card">
+      <div class="head"><h2>Nano Live Controls</h2><span id="liveState" class="chip cancelled">Stopped</span></div>
+      <div class="banner warn" id="liveUnsupported">Live controls appear only for devices with MOVE_FORWARD / MOVE_BACKWARD / ROTATE_LEFT / ROTATE_RIGHT capabilities.</div>
+      <div id="liveControlsBox">
+        <div class="banner">Hold a button or use keyboard W/A/S/D. Manual movement invalidates trusted grid pose in the backend.</div>
+        <div class="dpad">
+          <button class="up live-btn" data-live="MOVE_FORWARD"><span class="arrow">▲</span>Forward<span class="key">W / ↑</span></button>
+          <button class="left live-btn" data-live="ROTATE_LEFT"><span class="arrow">◀</span>Left<span class="key">A / ←</span></button>
+          <button class="stop" id="liveStop"><span class="arrow">■</span>STOP<span class="key">Space</span></button>
+          <button class="right live-btn" data-live="ROTATE_RIGHT"><span class="arrow">▶</span>Right<span class="key">D / →</span></button>
+          <button class="down live-btn" data-live="MOVE_BACKWARD"><span class="arrow">▼</span>Backward<span class="key">S / ↓</span></button>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="head"><h2>Live Notes</h2></div>
+      <p class="muted">Live commands are transient and expire quickly. They are not queued jobs and should not be used inside command sets.</p>
+      <div class="cmd-list"><span class="token">MOVE_FORWARD</span><span class="token">MOVE_BACKWARD</span><span class="token">ROTATE_LEFT</span><span class="token">ROTATE_RIGHT</span><span class="token">STOP</span></div>
+      <h3>Current Live Session</h3>
+      <pre id="liveJson">{}</pre>
+    </div>
+  </section>
+
+  <section id="gridView" class="view hidden grid cols-2">
+    <div class="card">
+      <div class="head"><h2>PLACE / Grid Commands</h2></div>
+      <div class="banner warn" id="placeReminder">Start untrusted. Use PLACE before grid movement or workflows that need pose.</div>
+      <h3>PLACE payload</h3>
+      <div class="form-grid">
+        <div><label>Grid X</label><input id="placeX" type="number" value="0"></div>
+        <div><label>Grid Y</label><input id="placeY" type="number" value="0"></div>
+        <div><label>Facing</label><select id="placeFacing"><option>North</option><option>East</option><option>South</option><option>West</option></select></div>
+        <div><label>Map ID</label><input id="placeMapId" type="number" value="1"></div>
+      </div>
+      <div style="margin-top:8px"><button class="btn primary" id="placeBtn">Queue PLACE</button> <button class="btn" id="refreshStatusBtn">Refresh Status</button></div>
+      <h3>Grid jobs</h3>
+      <div class="row-inline" id="gridJobButtons"></div>
+    </div>
+    <div class="card">
+      <div class="head"><h2>Grid Policy</h2></div>
+      <p class="muted">PLACE is logical only. MOVE / LEFT / RIGHT / STEP_BACK are queued jobs. The backend updates the trusted pose after the adapter reports job completion.</p>
+      <p class="muted">For Nano, JUMP_FORWARD / JUMP_BACKWARD / REPORT are hidden because they are legacy-only capabilities.</p>
+      <pre id="placePreview">{}</pre>
+    </div>
+  </section>
+
+  <section id="workflowView" class="view hidden grid cols-2">
+    <div class="card">
+      <div class="head"><h2>CommandSet / Workflow Builder</h2></div>
+      <div class="row-inline" style="align-items:end;margin-bottom:8px">
+        <div style="flex:1"><label>Name</label><br><input id="workflowName" value="Manual commandset" style="width:100%"></div>
+        <div><label>Mode</label><br><select id="workflowMode"><option>BestEffort</option><option>AllOrNothing</option></select></div>
+        <button class="btn primary" id="queueWorkflow">Queue CommandSet</button>
+      </div>
+      <label>Commands</label>
+      <textarea id="workflowText">PLACE 0,0,North
+MOVE
+RIGHT
+MOVE</textarea>
+      <div class="banner">Supported syntax: <code>MOVE</code>, <code>LEFT</code>, <code>RIGHT</code>, <code>STEP_BACK</code>, <code>PLACE 0,0,North</code>. Legacy devices can also use <code>REPORT</code>, <code>JUMP_FORWARD 2</code>, <code>JUMP_BACKWARD 2</code> when those capabilities exist.</div>
+    </div>
+    <div class="card">
+      <div class="head"><h2>Allowed In This Device</h2></div>
+      <div class="cmd-list" id="workflowAllowedTokens"></div>
+      <h3>Payload Preview</h3>
+      <pre id="workflowPreview">[]</pre>
+    </div>
+  </section>
+
+  <section id="historyView" class="view hidden grid cols-2">
+    <div class="card">
+      <div class="head"><h2>Jobs</h2><button class="btn" id="refreshJobsBtn">Refresh</button></div>
+      <div class="table-wrap"><table><thead><tr><th>ID</th><th>Cmd</th><th>Status</th><th>Workflow</th><th>Rollback</th><th>Modified</th><th>Actions</th></tr></thead><tbody id="jobsBody"></tbody></table></div>
+    </div>
+    <div class="card">
+      <div class="head"><h2>Workflows</h2></div>
+      <div class="table-wrap"><table><thead><tr><th>ID</th><th>Name</th><th>Mode</th><th>Status</th><th>Rollback</th><th>Actions</th></tr></thead><tbody id="workflowBody"></tbody></table></div>
+    </div>
+    <div class="card">
+      <div class="head"><h2>Job History</h2></div>
+      <div class="table-wrap"><table><thead><tr><th>ID</th><th>Job</th><th>Cmd</th><th>Exec</th><th>Success</th><th>Created</th><th>Actions</th></tr></thead><tbody id="jobHistoryBody"></tbody></table></div>
+    </div>
+    <div class="card">
+      <div class="head"><h2>Workflow History / Rollback</h2></div>
+      <div class="table-wrap" style="margin-bottom:10px"><table><thead><tr><th>ID</th><th>Workflow</th><th>Status</th><th>Success</th><th>Created</th><th>Actions</th></tr></thead><tbody id="workflowHistoryBody"></tbody></table></div>
+      <h3>Rollback Requests</h3>
+      <div class="table-wrap"><table><thead><tr><th>ID</th><th>Status</th><th>Target</th><th>Generated</th><th>Created</th></tr></thead><tbody id="rollbackBody"></tbody></table></div>
+    </div>
+  </section>
+
+  <section class="card" style="margin-top:16px">
+    <div class="head"><h2>Log</h2><button class="btn" id="clearLog">Clear</button></div>
+    <div class="log" id="log"></div>
+  </section>
+</main>
+<div class="modal-backdrop" id="modal"><div class="modal"><div class="head"><h2 id="modalTitle">Detail</h2><div><button class="btn" id="copyModal">Copy</button> <button class="btn" id="closeModal">Close</button></div></div><pre id="modalBody">{}</pre></div></div>
+<div class="toast-stack" id="toasts"></div>
+<script>
+const LIVE_COMMANDS = ['MOVE_FORWARD','MOVE_BACKWARD','ROTATE_LEFT','ROTATE_RIGHT'];
+const LIVE_ALL = [...LIVE_COMMANDS, 'STOP'];
+const GRID_COMMANDS = ['PLACE','MOVE','LEFT','RIGHT','STEP_BACK'];
+const LEGACY_ONLY = ['REPORT','JUMP_FORWARD','JUMP_BACKWARD'];
+const NON_WORKFLOW = ['MOVE_FORWARD','MOVE_BACKWARD','ROTATE_LEFT','ROTATE_RIGHT','STOP'];
+const ACTIVE_STATUSES = ['Queued','Claimed','Executing'];
+const HEADING_ALIASES = {N:'North',E:'East',S:'South',W:'West',NORTH:'North',EAST:'East',SOUTH:'South',WEST:'West'};
+const state = {
+  email: localStorage.getItem('rcEmail') || 'admin@test.com',
+  password: localStorage.getItem('rcPassword') || '<REDACTED-PASSWORD>',
+  deviceId: parseInt(localStorage.getItem('rcDeviceId') || '1', 10),
+  view: localStorage.getItem('rcView') || 'status',
+  devices: [], catalogue: [], capabilities: [], status: null,
+  jobs: [], workflows: [], jobHistory: [], workflowHistory: [], rollbackRequests: [],
+  commandByName: new Map(), commandById: new Map(), capabilityNames: new Set(),
+  liveSessionId: null, liveInterval: null, liveCommand: null, liveSeq: 1, activeKeys: new Set()
+};
+const $ = s => document.querySelector(s); const $$ = s => Array.from(document.querySelectorAll(s));
+function log(message, kind='info'){const t=new Date().toLocaleTimeString(); $('#log').textContent=`[${t}] ${message}\n` + $('#log').textContent; (kind==='error'?console.error:console.log)(message)}
+function toast(message, kind='info', ms=3000){const el=document.createElement('div'); el.className='toast '+kind; el.textContent=message; $('#toasts').appendChild(el); setTimeout(()=>el.remove(),ms)}
+function authHeader(){return 'Basic ' + btoa(state.email.trim() + ':' + state.password)}
+async function api(path, opts={}){opts.headers=Object.assign({Accept:'application/json','X-Requested-With':'XMLHttpRequest'}, opts.headers||{}, {Authorization:authHeader()}); if(opts.body && !opts.headers['Content-Type']) opts.headers['Content-Type']='application/json'; const res=await fetch(path,Object.assign({cache:'no-store',credentials:'same-origin'},opts)); const text=await res.text(); let data=null; try{data=text?JSON.parse(text):null}catch{data=text} if(!res.ok){const err=new Error(`${res.status} ${res.statusText}: ${typeof data==='string'?data:JSON.stringify(data)}`); err.status=res.status; err.body=data; throw err} return data}
+function showModal(title,obj){$('#modalTitle').textContent=title; $('#modalBody').textContent=typeof obj==='string'?obj:JSON.stringify(obj,null,2); $('#modal').classList.add('open')}
+$('#closeModal').onclick=()=>$('#modal').classList.remove('open'); $('#modal').onclick=e=>{if(e.target.id==='modal') $('#modal').classList.remove('open')}; $('#copyModal').onclick=()=>navigator.clipboard.writeText($('#modalBody').textContent).then(()=>toast('Copied','ok'));
+function setPill(kind,text){const p=$('#apiPill'); p.className='status-pill '+(kind||''); $('#apiText').textContent=text}
+function fmt(v){return v===null||v===undefined||v===''?'—':String(v)}
+function normalizeCommand(x){return String(x||'').trim().toUpperCase().replace(/-/g,'_')}
+function commandId(name){name=normalizeCommand(name); const cmd=state.commandByName.get(name); if(!cmd) throw new Error(`CommandCatalogue missing: ${name}`); return cmd.id}
+function commandName(id){return state.commandById.get(id)?.name || `#${id}`}
+function hasCap(name){return state.capabilityNames.has(normalizeCommand(name))}
+function statusChip(status){const cls=String(status||'').toLowerCase(); return `<span class="chip ${cls}">${fmt(status)}</span>`}
+function activeCount(rows){return (rows||[]).filter(x=>ACTIVE_STATUSES.includes(x.status)).length}
+function deviceProfile(){if(LIVE_COMMANDS.every(hasCap)) return 'Nano'; if(LEGACY_ONLY.some(hasCap)) return 'Legacy'; return 'Generic'}
+function isNano(){return deviceProfile()==='Nano'}
+function isLegacy(){return deviceProfile()==='Legacy'}
+function parseJson(s){try{return s?JSON.parse(s):{}}catch{return {raw:s}}}
+function saveSettings(){state.email=$('#email').value.trim(); state.password=$('#password').value; state.deviceId=parseInt($('#deviceId').value,10)||1; localStorage.setItem('rcEmail',state.email); localStorage.setItem('rcPassword',state.password); localStorage.setItem('rcDeviceId',String(state.deviceId))}
+function setView(v){state.view=v; localStorage.setItem('rcView',v); $$('.view').forEach(x=>x.classList.add('hidden')); $('#'+v+'View').classList.remove('hidden'); $$('#viewTabs button').forEach(b=>b.classList.toggle('active',b.dataset.view===v))}
+$$('#viewTabs button').forEach(b=>b.onclick=()=>setView(b.dataset.view)); setView(state.view);
+$('#email').value=state.email; $('#password').value=state.password; $('#deviceId').value=state.deviceId; $('#saveBtn').onclick=()=>{saveSettings(); refreshAll()}; $('#refreshBtn').onclick=()=>refreshAll(); $('#refreshStatusBtn').onclick=()=>refreshStatus(); $('#refreshJobsBtn').onclick=()=>refreshWork(); $('#clearLog').onclick=()=>$('#log').textContent='';
+$('#deviceSelect').onchange=e=>{state.deviceId=parseInt(e.target.value,10); $('#deviceId').value=state.deviceId; saveSettings(); refreshAll()}; $('#deviceId').onchange=()=>{saveSettings(); refreshAll()};
+async function loadReference(){state.devices=await api('/api/devices').catch(()=>[]); state.catalogue=await api('/api/command-catalogue'); state.commandByName=new Map(); state.commandById=new Map(); state.catalogue.forEach(c=>{state.commandByName.set(normalizeCommand(c.name),c); state.commandById.set(c.id,c)}); renderDeviceSelect()}
+function renderDeviceSelect(){const sel=$('#deviceSelect'); sel.innerHTML=''; (state.devices||[]).forEach(d=>{const opt=document.createElement('option'); opt.value=d.id; opt.textContent=`${d.id} · ${d.name || d.deviceIdentifier}`; sel.appendChild(opt)}); if(!state.devices.some(d=>d.id===state.deviceId)){const opt=document.createElement('option'); opt.value=state.deviceId; opt.textContent=`${state.deviceId} · Device ${state.deviceId}`; sel.appendChild(opt)} sel.value=String(state.deviceId)}
+async function refreshCapabilities(){state.capabilities=await api(`/api/devices/${state.deviceId}/capabilities`).catch(()=>[]); state.capabilityNames=new Set(); state.capabilities.filter(c=>c.isActive!==false).forEach(c=>state.capabilityNames.add(normalizeCommand(commandName(c.commandCatalogueId))))}
+async function refreshStatus(){state.status=await api(`/api/devices/${state.deviceId}/status`).catch(e=>{log('Status load failed: '+e.message,'error'); return null}); renderStatus()}
+async function refreshWork(){const [jobs,workflows,jh,wh,rr]=await Promise.all([api(`/api/devices/${state.deviceId}/jobs`).catch(()=>[]),api(`/api/devices/${state.deviceId}/workflows`).catch(()=>[]),api(`/api/devices/${state.deviceId}/job-history`).catch(()=>[]),api(`/api/devices/${state.deviceId}/workflow-history`).catch(()=>[]),api(`/api/devices/${state.deviceId}/rollback-requests`).catch(()=>[])]); state.jobs=jobs||[]; state.workflows=workflows||[]; state.jobHistory=jh||[]; state.workflowHistory=wh||[]; state.rollbackRequests=rr||[]; renderWork()}
+async function refreshAll(){saveSettings(); try{if(!state.catalogue.length) await loadReference(); await refreshCapabilities(); await Promise.all([refreshStatus(),refreshWork()]); setPill('ok',`Connected · Device ${state.deviceId}`); log('Refresh complete.')}catch(e){setPill('bad',e.status===401?'Auth failed':e.message); log('Refresh failed: '+e.message,'error'); toast(e.message,'error')} }
+function renderStatus(){const d=state.devices.find(x=>x.id===state.deviceId)||{}; const s=state.status||{}; $('#dName').textContent=fmt(d.name); $('#dIdent').textContent=fmt(d.deviceIdentifier); $('#dType').textContent=fmt(d.deviceType); $('#dMap').textContent=fmt(d.mapId || s.poseMapId); const profile=deviceProfile(); $('#profileChip').textContent=profile; $('#profileChip').className='chip '+(profile==='Nano'?'executing':profile==='Legacy'?'rolledback':'cancelled'); $('#poseX').textContent=fmt(s.gridX); $('#poseY').textContent=fmt(s.gridY); $('#poseFacing').textContent=fmt(s.facing); $('#poseConfidence').textContent=fmt(s.poseConfidence); $('#trustChip').textContent=s.isGridPoseTrusted?'Trusted':'Untrusted'; $('#trustChip').className='chip '+(s.isGridPoseTrusted?'completed':'failed'); $('#poseMessage').className='banner '+(s.isGridPoseTrusted?'ok':'warn'); $('#poseMessage').textContent=s.statusMessage || (s.isGridPoseTrusted?'Grid pose is trusted.':'Grid pose is untrusted. Queue PLACE before grid movement.'); renderCapabilities(); renderLiveSupport(); renderPlacePreview(); renderWorkflowAllowed()}
+function renderCapabilities(){const box=$('#capabilityTokens'); box.innerHTML=''; const names=Array.from(state.capabilityNames).sort(); if(!names.length){box.innerHTML='<span class="muted tiny">No active capabilities loaded.</span>'; return} names.forEach(n=>{const span=document.createElement('span'); span.className='token '+(LEGACY_ONLY.includes(n)?'legacy':''); span.textContent=n; box.appendChild(span)})}
+function renderLiveSupport(){const supported=LIVE_COMMANDS.every(hasCap); $('#liveUnsupported').classList.toggle('hidden',supported); $('#liveControlsBox').classList.toggle('hidden',!supported); $$('.live-btn,#liveStop').forEach(b=>b.disabled=!supported)}
+function renderWork(){const qj=state.jobs.filter(j=>j.status==='Queued').length; const aj=activeCount(state.jobs.filter(j=>!j.workflowId)); const qw=state.workflows.filter(w=>w.status==='Queued').length; const aw=activeCount(state.workflows); $('#sumQueuedJobs').textContent=qj; $('#sumActiveJobs').textContent=aj; $('#sumQueuedWf').textContent=qw; $('#sumActiveWf').textContent=aw; renderJobs(); renderWorkflows(); renderHistories(); renderRollbackRequests()}
+function renderJobs(){const tbody=$('#jobsBody'); tbody.innerHTML=''; if(!state.jobs.length){tbody.innerHTML='<tr><td colspan="7" class="muted">No jobs.</td></tr>';return} state.jobs.slice().sort((a,b)=>b.id-a.id).forEach(j=>{const tr=document.createElement('tr'); tr.className='clickable'; tr.onclick=e=>{if(e.target.tagName!=='BUTTON')showModal('Job '+j.id,j)}; tr.innerHTML=`<td>${j.id}</td><td>${commandName(j.commandCatalogueId)}</td><td>${statusChip(j.status)}</td><td>${fmt(j.workflowId)}</td><td>${j.isRollback?'yes':'no'}</td><td>${new Date(j.modifiedDate).toLocaleString()}</td><td>${j.status==='Queued'?`<button class="btn danger" data-cancel-job="${j.id}">Cancel</button>`:''} ${j.status==='Completed'?`<button class="btn roll" data-rb-job="${j.id}">Rollback</button>`:''}</td>`; tbody.appendChild(tr)}); tbody.querySelectorAll('[data-cancel-job]').forEach(b=>b.onclick=async e=>{e.stopPropagation(); await cancelJob(+b.dataset.cancelJob)}); tbody.querySelectorAll('[data-rb-job]').forEach(b=>b.onclick=async e=>{e.stopPropagation(); await rollbackJob(+b.dataset.rbJob)})}
+function renderWorkflows(){const tbody=$('#workflowBody'); tbody.innerHTML=''; if(!state.workflows.length){tbody.innerHTML='<tr><td colspan="6" class="muted">No workflows.</td></tr>';return} state.workflows.slice().sort((a,b)=>b.id-a.id).forEach(w=>{const tr=document.createElement('tr'); tr.className='clickable'; tr.onclick=e=>{if(e.target.tagName!=='BUTTON')showModal('Workflow '+w.id,w)}; tr.innerHTML=`<td>${w.id}</td><td>${fmt(w.name)}</td><td>${w.executionMode}</td><td>${statusChip(w.status)}</td><td>${w.isRollback?'yes':'no'}</td><td>${ACTIVE_STATUSES.includes(w.status)?`<button class="btn danger" data-cancel-wf="${w.id}">Cancel</button>`:''} ${w.status==='Completed'?`<button class="btn roll" data-rb-wf="${w.id}">Rollback</button>`:''}</td>`; tbody.appendChild(tr)}); tbody.querySelectorAll('[data-cancel-wf]').forEach(b=>b.onclick=async e=>{e.stopPropagation(); await cancelWorkflow(+b.dataset.cancelWf)}); tbody.querySelectorAll('[data-rb-wf]').forEach(b=>b.onclick=async e=>{e.stopPropagation(); await rollbackWorkflow(+b.dataset.rbWf)})}
+function renderHistories(){const jb=$('#jobHistoryBody'); jb.innerHTML=''; if(!state.jobHistory.length) jb.innerHTML='<tr><td colspan="7" class="muted">No job history.</td></tr>'; state.jobHistory.slice().sort((a,b)=>b.id-a.id).forEach(h=>{const tr=document.createElement('tr'); tr.className='clickable'; tr.onclick=e=>{if(e.target.tagName!=='BUTTON')showModal('JobHistory '+h.id,h)}; tr.innerHTML=`<td>${h.id}</td><td>${fmt(h.jobId)}</td><td>${h.commandName}</td><td>${h.executed?'yes':'no'}</td><td>${h.success?'yes':'no'}</td><td>${new Date(h.createdDate).toLocaleString()}</td><td>${h.executed&&h.success?`<button class="btn roll" data-rb-jh="${h.id}">Rollback</button>`:''}</td>`; jb.appendChild(tr)}); jb.querySelectorAll('[data-rb-jh]').forEach(b=>b.onclick=async e=>{e.stopPropagation(); await rollbackJobHistory(+b.dataset.rbJh)}); const wb=$('#workflowHistoryBody'); wb.innerHTML=''; if(!state.workflowHistory.length) wb.innerHTML='<tr><td colspan="6" class="muted">No workflow history.</td></tr>'; state.workflowHistory.slice().sort((a,b)=>b.id-a.id).forEach(h=>{const tr=document.createElement('tr'); tr.className='clickable'; tr.onclick=e=>{if(e.target.tagName!=='BUTTON')showModal('WorkflowHistory '+h.id,h)}; tr.innerHTML=`<td>${h.id}</td><td>${fmt(h.workflowId)}</td><td>${h.status}</td><td>${h.success?'yes':'no'}</td><td>${new Date(h.createdDate).toLocaleString()}</td><td>${h.success?`<button class="btn roll" data-rb-wh="${h.id}">Rollback</button>`:''}</td>`; wb.appendChild(tr)}); wb.querySelectorAll('[data-rb-wh]').forEach(b=>b.onclick=async e=>{e.stopPropagation(); await rollbackWorkflowHistory(+b.dataset.rbWh)})}
+function renderRollbackRequests(){const tbody=$('#rollbackBody'); tbody.innerHTML=''; if(!state.rollbackRequests.length){tbody.innerHTML='<tr><td colspan="5" class="muted">No rollback requests.</td></tr>';return} state.rollbackRequests.slice().sort((a,b)=>b.id-a.id).forEach(r=>{const tr=document.createElement('tr'); tr.className='clickable'; tr.onclick=()=>showModal('RollbackRequest '+r.id,r); tr.innerHTML=`<td>${r.id}</td><td>${statusChip(r.status)}</td><td>${r.targetType} ${r.targetIdsJson}</td><td>${fmt(r.generatedWorkflowId || r.generatedJobId)}</td><td>${new Date(r.createdDate).toLocaleString()}</td>`; tbody.appendChild(tr)})}
+async function queueJob(name,payload={},isRollback=false){name=normalizeCommand(name); if(!hasCap(name)) throw new Error(`Device ${state.deviceId} does not have ${name} capability.`); const body={commandCatalogueId:commandId(name),payloadJson:JSON.stringify(payload||{}),providerType:isRollback?'Rollback':'Api',isRollback}; const res=await api(`/api/devices/${state.deviceId}/jobs`,{method:'POST',body:JSON.stringify(body)}); toast(`Queued ${name} job ${res.id}`,'ok'); log(`Queued ${name} job ${res.id}`); await refreshWork(); return res}
+function placePayload(){const facing=HEADING_ALIASES[$('#placeFacing').value.toUpperCase()]||$('#placeFacing').value; const payload={gridX:parseInt($('#placeX').value,10)||0,gridY:parseInt($('#placeY').value,10)||0,facing}; const mapId=parseInt($('#placeMapId').value,10); if(mapId>0) payload.mapId=mapId; return payload}
+function renderPlacePreview(){$('#placePreview').textContent=JSON.stringify(placePayload(),null,2)}
+['placeX','placeY','placeFacing','placeMapId'].forEach(id=>$('#'+id).addEventListener('input',renderPlacePreview)); $('#placeBtn').onclick=()=>queueJob('PLACE',placePayload()).catch(e=>{toast(e.message,'error');log(e.message,'error')});
+function renderGridButtons(){const box=$('#gridJobButtons'); box.innerHTML=''; const commands=['MOVE','LEFT','RIGHT','STEP_BACK','REPORT','JUMP_FORWARD','JUMP_BACKWARD']; commands.filter(hasCap).forEach(cmd=>{const b=document.createElement('button'); b.className='btn'; b.textContent=cmd; b.onclick=()=>queueGridLike(cmd); box.appendChild(b)}); if(!box.children.length) box.innerHTML='<span class="muted tiny">No grid job capabilities.</span>'}
+function queueGridLike(cmd){cmd=normalizeCommand(cmd); let payload={source:'frontend-grid'}; if(cmd==='JUMP_FORWARD'||cmd==='JUMP_BACKWARD'){const n=parseInt(prompt('Number of steps/cells?', '2')||'2',10); payload.numberOfSteps=Math.max(1,n)} queueJob(cmd,payload).catch(e=>{toast(e.message,'error');log(e.message,'error')})}
+async function cancelJob(id){try{await api(`/api/jobs/${id}/cancel`,{method:'PATCH'}); toast('Job cancelled','ok'); await refreshWork()}catch(e){toast(e.message,'error')}}
+async function cancelWorkflow(id){try{await api(`/api/workflows/${id}/cancel`,{method:'PATCH'}); toast('Workflow cancelled','ok'); await refreshWork()}catch(e){toast(e.message,'error')}}
+async function rollbackJob(id){try{const body={deviceId:state.deviceId,requestedByProvider:'Api',jobHistoryIds:[],allowDuplicate:false}; const r=await api(`/api/jobs/${id}/rollback`,{method:'POST',body:JSON.stringify(body)}); toast(r.message||'Rollback generated','ok'); showModal('Rollback generated',r); await refreshWork()}catch(e){toast(e.message,'error');log(e.message,'error')}}
+async function rollbackWorkflow(id){try{const body={deviceId:state.deviceId,requestedByProvider:'Api',workflowHistoryIds:[],allowDuplicate:false}; const r=await api(`/api/workflows/${id}/rollback`,{method:'POST',body:JSON.stringify(body)}); toast(r.message||'Rollback generated','ok'); showModal('Rollback generated',r); await refreshWork()}catch(e){toast(e.message,'error');log(e.message,'error')}}
+async function rollbackJobHistory(id){try{const body={deviceId:state.deviceId,requestedByProvider:'Api',jobHistoryIds:[id],allowDuplicate:false}; const r=await api('/api/rollback/job-history',{method:'POST',body:JSON.stringify(body)}); toast(r.message||'Rollback generated','ok'); showModal('Rollback generated',r); await refreshWork()}catch(e){toast(e.message,'error');log(e.message,'error')}}
+async function rollbackWorkflowHistory(id){try{const body={deviceId:state.deviceId,requestedByProvider:'Api',workflowHistoryIds:[id],allowDuplicate:false}; const r=await api('/api/rollback/workflow-history',{method:'POST',body:JSON.stringify(body)}); toast(r.message||'Rollback generated','ok'); showModal('Rollback generated',r); await refreshWork()}catch(e){toast(e.message,'error');log(e.message,'error')}}
+function parseWorkflowLine(line){const raw=line.trim(); if(!raw || raw.startsWith('#')) return null; const parts=raw.replace(/,/g,' ').split(/\s+/).filter(Boolean); const cmd=normalizeCommand(parts[0]); if(NON_WORKFLOW.includes(cmd)) throw new Error(`${cmd} is a live/stop command and is not allowed in commandsets.`); if(!hasCap(cmd)) throw new Error(`Device does not support ${cmd}.`); let payload={source:'frontend-workflow',commandName:cmd}; if(cmd==='PLACE'){if(parts.length>=4){payload.gridX=parseInt(parts[1],10); payload.gridY=parseInt(parts[2],10); payload.facing=HEADING_ALIASES[parts[3].toUpperCase()]||parts[3]} else {Object.assign(payload,placePayload())}} if(cmd==='JUMP_FORWARD'||cmd==='JUMP_BACKWARD'){payload.numberOfSteps=Math.max(1,parseInt(parts[1]||'2',10)||2)} return {cmd,payload}}
+function parseWorkflow(){const lines=$('#workflowText').value.split(/\n|;/); const steps=[]; lines.forEach(line=>{const parsed=parseWorkflowLine(line); if(parsed) steps.push(parsed)}); if(!steps.length) throw new Error('Workflow is empty.'); return steps}
+function renderWorkflowAllowed(){const box=$('#workflowAllowedTokens'); box.innerHTML=''; const allowed=Array.from(state.capabilityNames).filter(n=>!NON_WORKFLOW.includes(n)).sort(); allowed.forEach(n=>{const span=document.createElement('span'); span.className='token '+(LEGACY_ONLY.includes(n)?'legacy':''); span.textContent=n; box.appendChild(span)}); renderGridButtons(); updateWorkflowPreview()}
+function updateWorkflowPreview(){try{const steps=parseWorkflow(); $('#workflowPreview').textContent=JSON.stringify(steps.map((s,i)=>({stepNumber:i+1,command:s.cmd,payload:s.payload})),null,2)}catch(e){$('#workflowPreview').textContent=e.message}}
+$('#workflowText').addEventListener('input',updateWorkflowPreview); $('#workflowMode').addEventListener('change',updateWorkflowPreview); $('#queueWorkflow').onclick=async()=>{try{const parsed=parseWorkflow(); const body={name:$('#workflowName').value.trim()||'Manual commandset',description:'Created from refactored frontend.',schemaVersion:'1.0',executionMode:$('#workflowMode').value,providerType:'Api',isRollback:false,steps:parsed.map((s,i)=>({stepNumber:i+1,commandCatalogueId:commandId(s.cmd),payloadJson:JSON.stringify(s.payload)}))}; const wf=await api(`/api/devices/${state.deviceId}/workflows`,{method:'POST',body:JSON.stringify(body)}); toast(`Workflow ${wf.id} queued`,'ok'); log(`Workflow ${wf.id} queued.`); await refreshWork(); showModal('Queued workflow',wf)}catch(e){toast(e.message,'error');log(e.message,'error')}};
+async function startLiveSession(){if(state.liveSessionId) return state.liveSessionId; const s=await api(`/api/devices/${state.deviceId}/live-control-sessions/start`,{method:'POST',body:'{}'}); state.liveSessionId=s.id; updateLiveState('Started'); return s.id}
+async function sendLive(cmd){cmd=normalizeCommand(cmd); if(!LIVE_ALL.includes(cmd)) throw new Error(`${cmd} is not a live command.`); const sid=await startLiveSession(); const body={liveControlSessionId:sid,commandName:cmd,payloadJson:'{}',sequenceNumber:state.liveSeq++,expiresInMs:650}; const res=await api(`/api/devices/${state.deviceId}/live-control-command`,{method:'PUT',body:JSON.stringify(body)}); $('#liveJson').textContent=JSON.stringify(res,null,2); return res}
+function updateLiveState(text){$('#liveState').textContent=text; $('#liveState').className='chip '+(text==='Stopped'?'cancelled':'executing')}
+function stopLiveInterval(){if(state.liveInterval) clearInterval(state.liveInterval); state.liveInterval=null; state.liveCommand=null}
+async function startLiveHold(cmd){if(!LIVE_COMMANDS.every(hasCap)) return toast('Selected device does not support live controls.','warn'); if(state.liveCommand===cmd && state.liveInterval) return; stopLiveInterval(); try{state.liveCommand=cmd; await sendLive(cmd); state.liveInterval=setInterval(()=>sendLive(cmd).catch(e=>{log('Live refresh failed: '+e.message,'error'); stopLive()}),220); updateLiveState(cmd)}catch(e){toast(e.message,'error');log(e.message,'error'); stopLiveInterval()}}
+async function stopLive(){stopLiveInterval(); updateLiveState('Stopped'); try{if(state.liveSessionId) await sendLive('STOP')}catch(e){log('Live STOP failed: '+e.message,'error')} if(state.liveSessionId){const sid=state.liveSessionId; state.liveSessionId=null; try{await api(`/api/devices/${state.deviceId}/live-control-sessions/${sid}/stop`,{method:'POST',body:JSON.stringify({stopReason:'UserStopped'})})}catch(e){log('Stop session failed: '+e.message,'error')}} await refreshStatus()}
+$$('.live-btn').forEach(b=>{const cmd=b.dataset.live; b.addEventListener('mousedown',e=>{e.preventDefault();startLiveHold(cmd)}); b.addEventListener('touchstart',e=>{e.preventDefault();startLiveHold(cmd)},{passive:false}); ['mouseup','mouseleave','touchend','touchcancel'].forEach(ev=>b.addEventListener(ev,e=>{e.preventDefault();stopLive()}))}); $('#liveStop').onclick=()=>stopLive();
+document.addEventListener('keydown',e=>{if(e.repeat || ['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)) return; const map={w:'MOVE_FORWARD',arrowup:'MOVE_FORWARD',s:'MOVE_BACKWARD',arrowdown:'MOVE_BACKWARD',a:'ROTATE_LEFT',arrowleft:'ROTATE_LEFT',d:'ROTATE_RIGHT',arrowright:'ROTATE_RIGHT'}; const k=e.key.toLowerCase(); if(k===' '){e.preventDefault(); stopLive(); return} if(map[k]){e.preventDefault(); state.activeKeys.add(k); startLiveHold(map[k])}}); document.addEventListener('keyup',e=>{const k=e.key.toLowerCase(); if(!state.activeKeys.has(k)) return; state.activeKeys.delete(k); if(!state.activeKeys.size) stopLive()});
+renderPlacePreview(); updateWorkflowPreview(); refreshAll(); setInterval(()=>{refreshStatus(); refreshWork()},5000);
+</script>
+</body>
+</html>

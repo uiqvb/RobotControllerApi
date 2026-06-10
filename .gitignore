@@ -1,0 +1,51 @@
+## Ignore Visual Studio temporary files, build results, and
+## user-specific files
+
+# User-specific files
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build results
+bin/
+obj/
+Debug/
+Release/
+
+# Visual Studio cache/options
+*.VC.db
+*.VC.opendb
+
+# ASP.NET Scaffolding
+/.vs/
+
+# NuGet
+*.nupkg
+**/packages/*
+!**/packages/build/
+
+# Rider
+.idea/
+
+# OS files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+*.DS_Store
+
+# dotnet tools
+*.dotCover
+
+# Logs
+*.log
+
+# Publish output
+publish/
+
+# JetBrains Rider
+/.idea/
+
+# IIS Express
+Documents/**/IISExpress/
