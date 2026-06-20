@@ -17,7 +17,7 @@ public class TelemetryController : ControllerBase
         _service = service;
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.DeviceCredential)]
+    [Authorize(Policy = AuthorizationPolicies.DeviceAdapter)]
     [HttpPost("adapter/devices/{deviceId:int}/telemetry")]
     public ActionResult CreateTelemetryReading(int deviceId, CreateTelemetryReadingRequest request)
     {
@@ -36,7 +36,7 @@ public class TelemetryController : ControllerBase
         }
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+    [Authorize(Policy = AuthorizationPolicies.HumanUser)]
     [HttpGet("devices/{deviceId:int}/telemetry")]
     public ActionResult GetTelemetryReadingsByDeviceId(
         int deviceId,
@@ -54,7 +54,7 @@ public class TelemetryController : ControllerBase
         }
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+    [Authorize(Policy = AuthorizationPolicies.HumanUser)]
     [HttpGet("devices/{deviceId:int}/telemetry/latest")]
     public ActionResult GetLatestTelemetryReadingByDeviceId(int deviceId)
     {
@@ -70,7 +70,7 @@ public class TelemetryController : ControllerBase
         }
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+    [Authorize(Policy = AuthorizationPolicies.HumanUser)]
     [HttpGet("devices/{deviceId:int}/telemetry/summary")]
     public ActionResult GetLatestTelemetrySummaryByDeviceId(int deviceId)
     {

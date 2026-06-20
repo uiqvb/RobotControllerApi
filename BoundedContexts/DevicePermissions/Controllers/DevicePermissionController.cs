@@ -7,7 +7,7 @@ using RobotControllerApi.BoundedContexts.DevicePermissions.Services;
 namespace RobotControllerApi.BoundedContexts.DevicePermissions.Controllers;
 
 [ApiController]
-[Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+[Authorize(Policy = AuthorizationPolicies.HumanUser)]
 [Route("api/device-permissions")]
 public class DevicePermissionController : ControllerBase
 {

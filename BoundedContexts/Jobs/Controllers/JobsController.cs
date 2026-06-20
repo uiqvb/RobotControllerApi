@@ -20,11 +20,11 @@ public class JobsController : ControllerBase
         _currentUserAccessor = currentUserAccessor;
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+    [Authorize(Policy = AuthorizationPolicies.HumanUser)]
     [HttpGet]
     public ActionResult GetJobs() => Ok(_service.GetJobs());
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+    [Authorize(Policy = AuthorizationPolicies.HumanUser)]
     [HttpGet("{id}")]
     public ActionResult GetJobById(int id)
     {
@@ -33,11 +33,11 @@ public class JobsController : ControllerBase
         return Ok(response);
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+    [Authorize(Policy = AuthorizationPolicies.HumanUser)]
     [HttpGet("/api/devices/{deviceId}/jobs")]
     public ActionResult GetJobsByDeviceId(int deviceId) => Ok(_service.GetJobsByDeviceId(deviceId));
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+    [Authorize(Policy = AuthorizationPolicies.HumanUser)]
     [HttpPost("/api/devices/{deviceId}/jobs")]
     public ActionResult CreateJob(int deviceId, CreateJobRequest request)
     {
@@ -52,7 +52,7 @@ public class JobsController : ControllerBase
         catch (InvalidOperationException ex) { return Conflict(ex.Message); }
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+    [Authorize(Policy = AuthorizationPolicies.HumanUser)]
     [HttpPut("{id}")]
     public ActionResult UpdateJob(int id, UpdateJobRequest request)
     {
@@ -66,7 +66,7 @@ public class JobsController : ControllerBase
         catch (InvalidOperationException ex) { return Conflict(ex.Message); }
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+    [Authorize(Policy = AuthorizationPolicies.HumanUser)]
     [HttpPatch("{id}/cancel")]
     public ActionResult CancelJob(int id)
     {
@@ -80,11 +80,11 @@ public class JobsController : ControllerBase
         catch (InvalidOperationException ex) { return Conflict(ex.Message); }
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+    [Authorize(Policy = AuthorizationPolicies.HumanUser)]
     [HttpPatch("{id}/deactivate")]
     public ActionResult DeactivateJob(int id) => CancelJob(id);
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+    [Authorize(Policy = AuthorizationPolicies.HumanUser)]
     [HttpDelete("{id}")]
     public ActionResult DeleteJob(int id)
     {
@@ -98,7 +98,7 @@ public class JobsController : ControllerBase
         catch (InvalidOperationException ex) { return Conflict(ex.Message); }
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.DeviceCredential)]
+    [Authorize(Policy = AuthorizationPolicies.DeviceAdapter)]
     [HttpPatch("/api/adapter/jobs/{jobId}/started")]
     public ActionResult MarkJobStarted(int jobId)
     {
@@ -114,7 +114,7 @@ public class JobsController : ControllerBase
         catch (InvalidOperationException ex) { return Conflict(ex.Message); }
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.DeviceCredential)]
+    [Authorize(Policy = AuthorizationPolicies.DeviceAdapter)]
     [HttpPatch("/api/adapter/jobs/{jobId}/completed")]
     public ActionResult MarkJobCompleted(int jobId, CompleteJobRequest request)
     {
@@ -130,7 +130,7 @@ public class JobsController : ControllerBase
         catch (InvalidOperationException ex) { return Conflict(ex.Message); }
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.DeviceCredential)]
+    [Authorize(Policy = AuthorizationPolicies.DeviceAdapter)]
     [HttpPatch("/api/adapter/jobs/{jobId}/failed")]
     public ActionResult MarkJobFailed(int jobId, FailJobRequest request)
     {

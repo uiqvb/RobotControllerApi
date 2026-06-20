@@ -8,7 +8,7 @@ using RobotControllerApi.BoundedContexts.Jobs.Services;
 namespace RobotControllerApi.BoundedContexts.Jobs.Controllers;
 
 [ApiController]
-[Authorize(AuthenticationSchemes = AuthenticationSchemes.DeviceCredential)]
+[Authorize(Policy = AuthorizationPolicies.DeviceAdapter)]
 [Route("api/adapter/devices/{deviceId}/work-items")]
 public class WorkDispatchController : ControllerBase
 {

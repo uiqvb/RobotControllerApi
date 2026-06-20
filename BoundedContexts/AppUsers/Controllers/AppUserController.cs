@@ -7,7 +7,7 @@ using RobotControllerApi.BoundedContexts.AppUsers.Services;
 namespace RobotControllerApi.BoundedContexts.AppUsers.Controllers;
 
 [ApiController]
-[Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic, Roles = "Admin")]
+[Authorize(Policy = AuthorizationPolicies.AdminOnly)]
 [Route("api/users")]
 public class AppUserController : ControllerBase
 {

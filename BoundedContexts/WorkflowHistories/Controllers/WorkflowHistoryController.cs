@@ -1,4 +1,6 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using RobotControllerApi.BoundedContexts.Auth.Constants;
 using RobotControllerApi.BoundedContexts.WorkflowHistories.Dtos;
 using RobotControllerApi.BoundedContexts.WorkflowHistories.Services;
 
@@ -6,6 +8,7 @@ namespace RobotControllerApi.BoundedContexts.WorkflowHistories.Controllers;
 
 [ApiController]
 [Route("api/workflow-history")]
+[Authorize(Policy = AuthorizationPolicies.HumanUser)]
 public class WorkflowHistoryController : ControllerBase
 {
     private readonly IWorkflowHistoryService _service;

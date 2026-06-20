@@ -8,7 +8,7 @@ using RobotControllerApi.BoundedContexts.LiveControls.Services;
 namespace RobotControllerApi.BoundedContexts.LiveControls.Controllers;
 
 [ApiController]
-[Authorize(AuthenticationSchemes = AuthenticationSchemes.DeviceCredential)]
+[Authorize(Policy = AuthorizationPolicies.DeviceAdapter)]
 [Route("api/adapter/devices/{deviceId:int}")]
 public class AdapterLiveControlController : ControllerBase
 {

@@ -7,7 +7,7 @@ using RobotControllerApi.BoundedContexts.DeviceCredentials.Services;
 namespace RobotControllerApi.BoundedContexts.DeviceCredentials.Controllers;
 
 [ApiController]
-[Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+[Authorize(Policy = AuthorizationPolicies.HumanUser)]
 [Route("api/device-credentials")]
 public class DeviceCredentialController : ControllerBase
 {

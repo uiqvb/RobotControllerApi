@@ -8,7 +8,7 @@ using RobotControllerApi.BoundedContexts.LiveControls.Services;
 namespace RobotControllerApi.BoundedContexts.LiveControls.Controllers;
 
 [ApiController]
-[Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+[Authorize(Policy = AuthorizationPolicies.HumanUser)]
 [Route("api")]
 public class LiveControlController : ControllerBase
 {

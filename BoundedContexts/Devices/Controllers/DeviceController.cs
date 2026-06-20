@@ -1,4 +1,6 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using RobotControllerApi.BoundedContexts.Auth.Constants;
 using RobotControllerApi.BoundedContexts.Devices.Dtos;
 using RobotControllerApi.BoundedContexts.Devices.Services;
 
@@ -6,6 +8,7 @@ namespace RobotControllerApi.BoundedContexts.Devices.Controllers;
 
 [ApiController]
 [Route("api/devices")]
+[Authorize(Policy = AuthorizationPolicies.HumanUser)]
 public class DeviceController : ControllerBase
 {
     private readonly IDeviceService _service;

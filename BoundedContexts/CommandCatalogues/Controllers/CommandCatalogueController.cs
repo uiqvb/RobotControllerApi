@@ -1,4 +1,6 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using RobotControllerApi.BoundedContexts.Auth.Constants;
 using RobotControllerApi.BoundedContexts.CommandCatalogues.Dtos;
 using RobotControllerApi.BoundedContexts.CommandCatalogues.Services;
 
@@ -6,6 +8,7 @@ namespace RobotControllerApi.BoundedContexts.CommandCatalogues.Controllers;
 
 [ApiController]
 [Route("api/command-catalogue")]
+[Authorize(Policy = AuthorizationPolicies.HumanUser)]
 public class CommandCatalogueController : ControllerBase
 {
     private readonly ICommandCatalogueService _service;

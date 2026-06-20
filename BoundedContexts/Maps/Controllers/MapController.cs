@@ -1,4 +1,6 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using RobotControllerApi.BoundedContexts.Auth.Constants;
 using RobotControllerApi.BoundedContexts.Maps.Dtos;
 using RobotControllerApi.BoundedContexts.Maps.Services;
 
@@ -6,6 +8,7 @@ namespace RobotControllerApi.BoundedContexts.Maps.Controllers;
 
 [ApiController]
 [Route("api/maps")]
+[Authorize(Policy = AuthorizationPolicies.HumanUser)]
 public class MapController : ControllerBase
 {
     private readonly IMapService _service;

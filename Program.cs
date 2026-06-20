@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi.Models;
 
@@ -119,6 +120,12 @@ builder.Services.AddAuthorization(options =>
         policy.AddAuthenticationSchemes(AuthenticationSchemes.Basic)
               .RequireAuthenticatedUser()
               .RequireRole("Admin"));
+
+    // Fail-closed default: any endpoint without an explicit [Authorize]/[AllowAnonymous]
+    // is denied unless the caller is an authenticated user (via the default Basic scheme).
+    options.FallbackPolicy = new AuthorizationPolicyBuilder()
+        .RequireAuthenticatedUser()
+        .Build();
 });
 
 var dbConfig = new DbConfig(builder.Configuration);
@@ -136,10 +143,12 @@ if (app.Environment.IsDevelopment())
 }
 
 // app.UseHttpsRedirection();
-app.UseAuthentication();
-app.UseAuthorization();
+// Static files (the dashboard) are served before auth so the fail-closed
+// fallback policy does not block anonymous access to the SPA.
 app.UseDefaultFiles();
 app.UseStaticFiles();
+app.UseAuthentication();
+app.UseAuthorization();
 app.MapControllers();
 app.Run();
 

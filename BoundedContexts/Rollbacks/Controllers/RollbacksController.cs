@@ -1,4 +1,6 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using RobotControllerApi.BoundedContexts.Auth.Constants;
 using RobotControllerApi.BoundedContexts.Rollbacks.Dtos;
 using RobotControllerApi.BoundedContexts.Rollbacks.Services;
 
@@ -6,6 +8,7 @@ namespace RobotControllerApi.BoundedContexts.Rollbacks.Controllers;
 
 [ApiController]
 [Route("api/rollback-requests")]
+[Authorize(Policy = AuthorizationPolicies.HumanUser)]
 public class RollbacksController : ControllerBase
 {
     private readonly IRollbackService _service;

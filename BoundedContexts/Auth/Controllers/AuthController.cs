@@ -51,7 +51,7 @@ public class AuthController : ControllerBase
         }
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+    [Authorize(Policy = AuthorizationPolicies.HumanUser)]
     [HttpGet("me")]
     public ActionResult Me()
     {
@@ -66,7 +66,7 @@ public class AuthController : ControllerBase
         }
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+    [Authorize(Policy = AuthorizationPolicies.HumanUser)]
     [HttpPost("verify-password")]
     public ActionResult VerifyPassword(VerifyPasswordRequest request)
     {

@@ -1,4 +1,6 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using RobotControllerApi.BoundedContexts.Auth.Constants;
 using RobotControllerApi.BoundedContexts.JobHistories.Dtos;
 using RobotControllerApi.BoundedContexts.JobHistories.Services;
 
@@ -6,6 +8,7 @@ namespace RobotControllerApi.BoundedContexts.JobHistories.Controllers;
 
 [ApiController]
 [Route("api/job-history")]
+[Authorize(Policy = AuthorizationPolicies.HumanUser)]
 public class JobHistoryController : ControllerBase
 {
     private readonly IJobHistoryService _service;

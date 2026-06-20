@@ -20,11 +20,11 @@ public class WorkflowsController : ControllerBase
         _currentUserAccessor = currentUserAccessor;
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+    [Authorize(Policy = AuthorizationPolicies.HumanUser)]
     [HttpGet]
     public ActionResult GetWorkflows() => Ok(_service.GetWorkflows());
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+    [Authorize(Policy = AuthorizationPolicies.HumanUser)]
     [HttpGet("{id}")]
     public ActionResult GetWorkflowById(int id)
     {
@@ -33,11 +33,11 @@ public class WorkflowsController : ControllerBase
         return Ok(response);
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+    [Authorize(Policy = AuthorizationPolicies.HumanUser)]
     [HttpGet("/api/devices/{deviceId}/workflows")]
     public ActionResult GetWorkflowsByDeviceId(int deviceId) => Ok(_service.GetWorkflowsByDeviceId(deviceId));
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+    [Authorize(Policy = AuthorizationPolicies.HumanUser)]
     [HttpPost("/api/devices/{deviceId}/workflows")]
     public ActionResult CreateWorkflow(int deviceId, CreateWorkflowRequest request)
     {
@@ -52,7 +52,7 @@ public class WorkflowsController : ControllerBase
         catch (InvalidOperationException ex) { return Conflict(ex.Message); }
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+    [Authorize(Policy = AuthorizationPolicies.HumanUser)]
     [HttpPut("{id}")]
     public ActionResult UpdateWorkflow(int id, UpdateWorkflowRequest request)
     {
@@ -66,7 +66,7 @@ public class WorkflowsController : ControllerBase
         catch (InvalidOperationException ex) { return Conflict(ex.Message); }
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+    [Authorize(Policy = AuthorizationPolicies.HumanUser)]
     [HttpPatch("{id}/cancel")]
     public ActionResult CancelWorkflow(int id)
     {
@@ -80,7 +80,7 @@ public class WorkflowsController : ControllerBase
         catch (InvalidOperationException ex) { return Conflict(ex.Message); }
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.Basic)]
+    [Authorize(Policy = AuthorizationPolicies.HumanUser)]
     [HttpDelete("{id}")]
     public ActionResult DeleteWorkflow(int id)
     {
@@ -94,7 +94,7 @@ public class WorkflowsController : ControllerBase
         catch (InvalidOperationException ex) { return Conflict(ex.Message); }
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.DeviceCredential)]
+    [Authorize(Policy = AuthorizationPolicies.DeviceAdapter)]
     [HttpPatch("/api/adapter/workflows/{workflowId}/started")]
     public ActionResult MarkWorkflowStarted(int workflowId)
     {
@@ -110,7 +110,7 @@ public class WorkflowsController : ControllerBase
         catch (InvalidOperationException ex) { return Conflict(ex.Message); }
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.DeviceCredential)]
+    [Authorize(Policy = AuthorizationPolicies.DeviceAdapter)]
     [HttpPatch("/api/adapter/workflows/{workflowId}/completed")]
     public ActionResult MarkWorkflowCompleted(int workflowId, CompleteWorkflowRequest request)
     {
@@ -126,7 +126,7 @@ public class WorkflowsController : ControllerBase
         catch (InvalidOperationException ex) { return Conflict(ex.Message); }
     }
 
-    [Authorize(AuthenticationSchemes = AuthenticationSchemes.DeviceCredential)]
+    [Authorize(Policy = AuthorizationPolicies.DeviceAdapter)]
     [HttpPatch("/api/adapter/workflows/{workflowId}/failed")]
     public ActionResult MarkWorkflowFailed(int workflowId, FailWorkflowRequest request)
     {
