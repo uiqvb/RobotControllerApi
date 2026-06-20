@@ -13,6 +13,14 @@ public static class DomainConstants
     public static readonly string[] CommandExecutionKinds = { "Grid", "Continuous", "Mode", "Query" };
     public static readonly string[] CommandRollbackKinds = { "Exact", "BestEffort", "None" };
 
+    // Human roles. Case-sensitive on purpose: the stored Role and the AdminOnly policy's
+    // RequireRole("Admin") check are case-sensitive, so validation must match exactly.
+    public static readonly string[] Roles = { "Admin", "User" };
+
+    // Per-device permission tiers, lowest -> highest authority.
+    // Rank is derived from position in this array (index + 1), so order matters.
+    public static readonly string[] PermissionTiers = { "Viewer", "Operator", "Manager", "Owner" };
+
     private static readonly HashSet<string> GridTrustCommandNames = new(StringComparer.OrdinalIgnoreCase)
     {
         "MOVE", "LEFT", "RIGHT", "STEP_BACK", "JUMP_FORWARD", "JUMP_BACKWARD"
@@ -28,5 +36,21 @@ public static class DomainConstants
     public static bool IsLiveControlCommand(string value) => LiveControlCommands.Contains(value, StringComparer.OrdinalIgnoreCase);
     public static bool IsCommandExecutionKind(string value) => CommandExecutionKinds.Contains(value, StringComparer.OrdinalIgnoreCase);
     public static bool IsCommandRollbackKind(string value) => CommandRollbackKinds.Contains(value, StringComparer.OrdinalIgnoreCase);
+    public static bool IsRole(string value) => Roles.Contains(value);
+    public static bool IsPermissionTier(string value) => PermissionTiers.Contains(value, StringComparer.OrdinalIgnoreCase);
     public static bool RequiresTrustedGridPose(string commandName) => GridTrustCommandNames.Contains(commandName);
+
+    // Returns 1..N for a known permission tier (higher = more authority), or 0 if unknown.
+    public static int GetPermissionTierRank(string permissionLevel)
+    {
+        for (var i = 0; i < PermissionTiers.Length; i++)
+        {
+            if (string.Equals(PermissionTiers[i], permissionLevel, StringComparison.OrdinalIgnoreCase))
+            {
+                return i + 1;
+            }
+        }
+
+        return 0;
+    }
 }

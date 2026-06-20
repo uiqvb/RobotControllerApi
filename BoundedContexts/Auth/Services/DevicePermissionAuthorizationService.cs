@@ -1,19 +1,12 @@
 using System.Security.Claims;
 using RobotControllerApi.BoundedContexts.AppUsers.Persistence;
 using RobotControllerApi.BoundedContexts.DevicePermissions.Persistence;
+using RobotControllerApi.BoundedContexts.Shared;
 
 namespace RobotControllerApi.BoundedContexts.Auth.Services;
 
 public class DevicePermissionAuthorizationService
 {
-    private static readonly Dictionary<string, int> PermissionRanks = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["Viewer"] = 1,
-        ["Operator"] = 2,
-        ["Manager"] = 3,
-        ["Owner"] = 4
-    };
-
     private readonly IAppUserDataAccess _users;
     private readonly IDevicePermissionDataAccess _permissions;
     private readonly CurrentUserAccessor _currentUserAccessor;
@@ -62,14 +55,10 @@ public class DevicePermissionAuthorizationService
             .Where(x => x.DeviceId == deviceId)
             .Where(x => x.IsActive)
             .Where(x => !x.ExpiresAtUtc.HasValue || x.ExpiresAtUtc.Value > now)
-            .OrderByDescending(x => GetRank(x.PermissionLevel))
+            .OrderByDescending(x => DomainConstants.GetPermissionTierRank(x.PermissionLevel))
             .FirstOrDefault();
 
-        return permission != null && GetRank(permission.PermissionLevel) >= GetRank(requiredLevel);
-    }
-
-    private static int GetRank(string permissionLevel)
-    {
-        return PermissionRanks.TryGetValue(permissionLevel, out var rank) ? rank : 0;
+        return permission != null
+            && DomainConstants.GetPermissionTierRank(permission.PermissionLevel) >= DomainConstants.GetPermissionTierRank(requiredLevel);
     }
 }

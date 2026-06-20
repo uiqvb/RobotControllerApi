@@ -1,13 +1,13 @@
 using RobotControllerApi.BoundedContexts.AppUsers.Dtos;
 using RobotControllerApi.BoundedContexts.AppUsers.Models;
 using RobotControllerApi.BoundedContexts.AppUsers.Persistence;
+using RobotControllerApi.BoundedContexts.Shared;
 
 namespace RobotControllerApi.BoundedContexts.AppUsers.Services;
 
 public class AppUserService : IAppUserService
 {
     private readonly IAppUserDataAccess _dataAccess;
-    private static readonly string[] Roles = { "Admin", "User" };
 
     public AppUserService(IAppUserDataAccess dataAccess)
     {
@@ -98,7 +98,7 @@ public class AppUserService : IAppUserService
         if (email.Length > 320) throw new ArgumentException("Email cannot exceed 320 characters.");
         if (string.IsNullOrWhiteSpace(displayName)) throw new ArgumentException("DisplayName is required.");
         if (displayName.Length > 200) throw new ArgumentException("DisplayName cannot exceed 200 characters.");
-        if (!Roles.Contains(role)) throw new ArgumentException("Role must be Admin or User.");
+        if (!DomainConstants.IsRole(role)) throw new ArgumentException("Role must be Admin or User.");
     }
 
     private static AppUserResponse MapToResponse(AppUser model)
