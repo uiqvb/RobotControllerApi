@@ -15,6 +15,16 @@ stays simple.
 
 ---
 
+## Demo
+
+The robot running against this backend:
+
+[![Watch the demo](https://img.youtube.com/vi/ZW7Ps9AMmc0/hqdefault.jpg)](https://www.youtube.com/watch?v=ZW7Ps9AMmc0)
+
+<https://www.youtube.com/watch?v=ZW7Ps9AMmc0>
+
+---
+
 ## Why it's interesting
 
 **Robots pull, the server never pushes.** Every robot polls a claim endpoint for its next work item.
