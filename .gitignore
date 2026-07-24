@@ -1,6 +1,18 @@
 # Local dev secrets — never commit
 RobotControllerApi_BASIC_SECRETS_README.md
 docs/archive/RobotControllerApi_BASIC_SECRETS_README.md
+*.secrets.json
+appsettings.*.local.json
+
+# Local working notes (not part of the published project)
+CLAUDE.md
+.claude/
+docs/
+
+# Editor / IDE
+.vs/
+.vscode/
+*.lscache
 
 ## Ignore Visual Studio temporary files, build results, and
 ## user-specific files
