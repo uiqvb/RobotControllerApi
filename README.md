@@ -1,5 +1,10 @@
 # RobotControllerApi
 
+![.NET 8](https://img.shields.io/badge/.NET-8.0-512BD4?logo=dotnet&logoColor=white)
+![C#](https://img.shields.io/badge/C%23-239120?logo=csharp&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?logo=postgresql&logoColor=white)
+![License: MIT](https://img.shields.io/badge/License-MIT-green)
+
 A hardware-neutral .NET 8 backend that orchestrates autonomous mobile robots over HTTP.
 
 It was built as the "brain" for a smart clothesline robot — an Arduino Nano 33 IoT robocar that
