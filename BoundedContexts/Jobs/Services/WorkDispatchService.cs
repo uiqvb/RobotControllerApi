@@ -188,10 +188,17 @@ public class WorkDispatchService : IWorkDispatchService
         status.ModifiedDate = now;
         _deviceStatusDataAccess.UpdateDeviceStatus(status.Id, status);
 
+        var touchedWorkflowIds = new HashSet<int>();
+
         foreach (var step in request.Steps)
         {
             RecordOfflineRollbackStep(deviceId, step, now);
-            MarkOriginalJobRolledBack(step.RollbackOfJobId, deviceId, now);
+            MarkOriginalJobRolledBack(step.RollbackOfJobId, deviceId, touchedWorkflowIds, now);
+        }
+
+        foreach (var workflowId in touchedWorkflowIds)
+        {
+            MarkWorkflowRolledBackIfAnyStepReversed(workflowId, now);
         }
 
         return new OfflineRollbackReconcileResponse
@@ -295,7 +302,7 @@ public class WorkDispatchService : IWorkDispatchService
 
     // The work the robot undid should not stay Completed, or the dashboard shows the robot
     // having done something it has since reversed.
-    private void MarkOriginalJobRolledBack(int? jobId, int deviceId, DateTime now)
+    private void MarkOriginalJobRolledBack(int? jobId, int deviceId, HashSet<int> touchedWorkflowIds, DateTime now)
     {
         if (!jobId.HasValue) return;
 
@@ -306,6 +313,29 @@ public class WorkDispatchService : IWorkDispatchService
         job.Status = "RolledBack";
         job.ModifiedDate = now;
         _jobDataAccess.UpdateJob(job.Id, job);
+
+        if (job.WorkflowId.HasValue) touchedWorkflowIds.Add(job.WorkflowId.Value);
+    }
+
+    // A workflow whose steps have been reversed should not still read Completed.
+    //
+    // Deliberately "any step", not "all steps": an offline burst reverses a fixed chunk, so it
+    // routinely undoes part of a workflow — five of six in the first hardware test. Requiring
+    // all steps would leave the common case reading Completed over a pile of RolledBack rows,
+    // which is the confusing display this fixes. The schema has no PartiallyRolledBack status,
+    // and adding one would be a migration.
+    private void MarkWorkflowRolledBackIfAnyStepReversed(int workflowId, DateTime now)
+    {
+        var workflow = _workflowDataAccess.GetWorkflowById(workflowId);
+        if (workflow == null || workflow.IsRollback) return;
+        if (workflow.Status.Equals("RolledBack", StringComparison.OrdinalIgnoreCase)) return;
+
+        var jobs = _jobDataAccess.GetJobsByWorkflowId(workflowId);
+        if (!jobs.Any(x => x.Status.Equals("RolledBack", StringComparison.OrdinalIgnoreCase))) return;
+
+        workflow.Status = "RolledBack";
+        workflow.ModifiedDate = now;
+        _workflowDataAccess.UpdateWorkflow(workflow.Id, workflow);
     }
 
     // The inverse handed to the robot alongside the command, for its local undo stack.

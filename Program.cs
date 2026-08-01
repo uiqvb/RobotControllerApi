@@ -58,6 +58,18 @@ using RobotControllerApi.BoundedContexts.LiveControls.Persistence;
 using RobotControllerApi.BoundedContexts.LiveControls.Services;
 
 
+// Every timestamp column in this schema is `timestamp without time zone` and every value the
+// app writes is DateTime.UtcNow. Npgsql 6+ maps a DateTime with Kind=Utc to `timestamptz`, so
+// PostgreSQL converted it into the server's local zone on the way in — a UTC+10 machine stored
+// 15:25 where 05:25 was meant, ten hours ahead of the DateTime.UtcNow it is later compared to.
+//
+// The visible damage was lease expiry: LeaseExpiresAtUtc landed ten hours in the future, so
+// ExpireStaleWork never fired and a stalled robot's queue could never drain.
+//
+// Legacy behaviour writes the DateTime verbatim, which is what these columns expect.
+// Must be set before the first Npgsql call.
+AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
+
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
