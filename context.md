@@ -153,6 +153,42 @@ End-to-end on real hardware, 1 August 2026:
 
 ---
 
+## 4b. Voltage sag — fixed 1 August 2026
+
+**The Nano used to reboot whenever the motors started, stopped, or reversed.** Root cause: it was
+powered from the L298N's onboard 5V regulator — the *same* regulator the motor driver loads. Under
+motor current that rail sagged below the regulator's dropout and the board browned out.
+
+`docs/hardware-changes.md` had explicitly ruled out both a buck converter and separating the
+supplies, opting for a bulk capacitor on the shared rail instead. **That call was wrong.** The fix
+was to separate the supplies:
+
+```
+Battery + ──┬── L298N 12V
+            └── Buck IN+
+Battery − ──┬── L298N GND ──── − rail
+            └── Buck IN−
+Buck OUT+ ───── Nano VIN        (NOT the 5V or 3.3V pin — those bypass the regulator)
+Buck OUT− ───── − rail
+(the old L298N 5V → Nano wire was removed — that removal IS the fix)
+```
+
+Buck output set to **6.0V**. Not arbitrary: `VIN` needs ≥5V, and a step-down needs ~1.5V of
+headroom above its output, so 6.0V keeps regulating until the pack falls to ~7.5V. Setting it
+near the battery voltage (it shipped at 8.5V from a 9.1V pack) leaves no headroom and the
+converter just passes the sag straight through.
+
+**Verified, not assumed.** With no multimeter available, the firmware reports diagnostics with
+every completed job (`bootId`, `uptimeMs`, `resetCause` from the SAMD21 reset-cause register).
+A 10-step run with four forward↔reverse transitions produced **one single bootId across all ten
+steps**, monotonic uptime, and `resetCause` never leaving `POWER_ON` — the brown-out detector
+never fired. Before the fix the same load rebooted the board.
+
+Note the diagnostics are read from the database, deliberately: attaching USB for serial would
+power the Nano and mask the very brownouts under investigation.
+
+---
+
 ## 5. Running it
 
 ```bash
