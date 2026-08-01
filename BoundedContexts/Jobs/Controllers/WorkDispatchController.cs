@@ -35,4 +35,19 @@ public class WorkDispatchController : ControllerBase
         catch (ArgumentException ex) { return BadRequest(ex.Message); }
         catch (InvalidOperationException ex) { return Conflict(ex.Message); }
     }
+
+    // Called by a robot on reconnect, after it rolled itself back while the backend was
+    // unreachable. Until this lands the backend's pose is stale by however far the robot drove.
+    [HttpPost("report-offline-rollback")]
+    public ActionResult ReportOfflineRollback(int deviceId, ReportOfflineRollbackRequest request)
+    {
+        try
+        {
+            var deviceCredentialId = _currentUserAccessor.GetRequiredDeviceCredentialId(User);
+            return Ok(_service.ReportOfflineRollback(deviceId, request, deviceCredentialId));
+        }
+        catch (UnauthorizedAccessException ex) { return Unauthorized(ex.Message); }
+        catch (ArgumentException ex) { return BadRequest(ex.Message); }
+        catch (InvalidOperationException ex) { return Conflict(ex.Message); }
+    }
 }

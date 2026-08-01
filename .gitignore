@@ -4,6 +4,12 @@ docs/archive/RobotControllerApi_BASIC_SECRETS_README.md
 *.secrets.json
 appsettings.*.local.json
 
+# Nano firmware — lives in its own repo, and the sketches carry hardcoded
+# WiFi + device credentials in plaintext.
+Firmware/
+*.ino
+code_final*
+
 # Local working notes (not part of the published project)
 CLAUDE.md
 .claude/

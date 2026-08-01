@@ -7,6 +7,7 @@ using RobotControllerApi.BoundedContexts.Auth.Constants;
 using RobotControllerApi.BoundedContexts.Auth.Handlers;
 using RobotControllerApi.BoundedContexts.Auth.Services;
 
+using RobotControllerApi.Infrastructure;
 using RobotControllerApi.Infrastructure.DataAccess;
 using RobotControllerApi.Infrastructure.DataAccess.ADO;
 using RobotControllerApi.Infrastructure.DataAccess.EFCore;
@@ -177,6 +178,9 @@ static void RegisterServices(IServiceCollection services)
     services.AddScoped<IConditionClassifier, ConditionClassifier>();
     services.AddScoped<ITelemetryService, TelemetryService>();
     services.AddScoped<ILiveControlService, LiveControlService>();
+
+    // Drains expired leases without waiting for the stalled robot to poll again.
+    services.AddHostedService<StaleWorkExpiryService>();
 }
 
 static void RegisterPersistence(IServiceCollection services, DbConfig dbConfig)

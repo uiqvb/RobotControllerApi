@@ -84,11 +84,277 @@ public class WorkDispatchService : IWorkDispatchService
 
             MarkParentWorkflowClaimed(job.WorkflowId, deviceCredentialId, now, leaseMinutes);
 
-            return new WorkItemClaimResponse { WorkItemType = "Job", Job = JobService.MapToResponse(job) };
+            var (inverseCommandName, inversePayloadJson) = BuildCachedInverse(job);
+
+            return new WorkItemClaimResponse
+            {
+                WorkItemType = "Job",
+                Job = JobService.MapToResponse(job),
+                InverseCommandName = inverseCommandName,
+                InversePayloadJson = inversePayloadJson
+            };
         }
 
         return null;
     }
+
+    // Stale-expiry used to run only inside claim-next, so a robot that stopped polling never
+    // drained its own queue: its lease never expired, and the per-device cap then rejected
+    // every new job. A robot that dies mid-demo would brick the queue until restarted by hand.
+    // Running the same sweep on a timer removes the dependency on the dead robot polling.
+    public int ExpireStaleWorkForAllDevices()
+    {
+        var now = DateTime.UtcNow;
+
+        var staleJobs = _jobDataAccess.GetJobs()
+            .Where(x => (x.Status.Equals("Claimed", StringComparison.OrdinalIgnoreCase) || x.Status.Equals("Executing", StringComparison.OrdinalIgnoreCase))
+                        && x.LeaseExpiresAtUtc.HasValue
+                        && x.LeaseExpiresAtUtc.Value <= now)
+            .ToList();
+
+        foreach (var deviceId in staleJobs.Select(x => x.DeviceId).Distinct())
+        {
+            ExpireStaleWork(deviceId, now);
+        }
+
+        return staleJobs.Count;
+    }
+
+    public OfflineRollbackReconcileResponse ReportOfflineRollback(int deviceId, ReportOfflineRollbackRequest request, int deviceCredentialId)
+    {
+        if (deviceId <= 0) throw new ArgumentException("DeviceId is required.");
+        if (deviceCredentialId <= 0) throw new ArgumentException("DeviceCredentialId is required.");
+        if (!_jobDataAccess.DeviceCredentialOwnsDevice(deviceCredentialId, deviceId)) throw new InvalidOperationException("DeviceCredential does not own the route device.");
+        if (request.Steps.Count == 0) throw new ArgumentException("At least one executed rollback step is required.");
+
+        var now = DateTime.UtcNow;
+
+        // Settle whatever the disconnect stranded first, so work the robot abandoned when it
+        // went dark does not keep blocking the queue behind this reconciliation.
+        ExpireStaleWork(deviceId, now);
+
+        var status = _deviceStatusDataAccess.GetDeviceStatusByDeviceId(deviceId);
+        if (status == null) throw new InvalidOperationException("Device has no status row to reconcile against.");
+
+        // Deliberately NOT requiring trusted pose. Losing the connection is precisely what
+        // dropped trust (ExpireStaleWork -> InvalidatePose), so demanding it here would make
+        // reconciliation impossible in the exact case it exists for. Invalidation clears the
+        // flags but leaves the coordinates, and those coordinates are the anchor we replay from.
+        var mapId = status.PoseMapId ?? _jobDataAccess.GetDeviceMapId(deviceId);
+        if (!mapId.HasValue || !status.GridX.HasValue || !status.GridY.HasValue || string.IsNullOrWhiteSpace(status.Facing))
+        {
+            return RejectReconciliation(status, request.Steps.Count, "No last known grid pose to reconcile from. PLACE the robot before reporting an offline rollback.", now);
+        }
+
+        var map = _mapDataAccess.GetMapById(mapId.Value);
+        if (map == null || !map.IsActive)
+        {
+            return RejectReconciliation(status, request.Steps.Count, "Reconciliation requires an active map.", now);
+        }
+
+        // Simulate the whole report before committing any of it. A half-applied rollback would
+        // leave the backend recording a position the robot was never at, which is worse than
+        // admitting we are lost.
+        var pose = new GridPose { MapId = mapId, X = status.GridX, Y = status.GridY, Facing = status.Facing, IsAligned = true, IsTrusted = true };
+
+        foreach (var step in request.Steps)
+        {
+            var commandName = step.CommandName?.Trim() ?? string.Empty;
+            if (commandName.Length == 0)
+            {
+                return RejectReconciliation(status, request.Steps.Count, "A reported rollback step had no command name.", now);
+            }
+
+            if (!TryApplyReportedStep(commandName, pose, map, out var failure))
+            {
+                return RejectReconciliation(status, request.Steps.Count, $"Reported rollback step {commandName} could not be reconciled: {failure}", now);
+            }
+        }
+
+        // The whole sequence holds together, so adopt it and hand grid work back to the robot.
+        status.PoseMapId = pose.MapId;
+        status.GridX = pose.X;
+        status.GridY = pose.Y;
+        status.Facing = pose.Facing;
+        status.IsGridAligned = true;
+        status.IsGridPoseTrusted = true;
+        status.PoseConfidence = 1.0;
+        status.IsInsideMap = true;
+        status.ConnectionState = "Online";
+        status.StatusMessage = string.IsNullOrWhiteSpace(request.Reason)
+            ? $"Grid pose resynced after the robot reported {request.Steps.Count} offline rollback step(s)."
+            : $"Grid pose resynced after offline rollback: {request.Reason.Trim()}";
+        status.LastSeenAtUtc = now;
+        status.ModifiedDate = now;
+        _deviceStatusDataAccess.UpdateDeviceStatus(status.Id, status);
+
+        foreach (var step in request.Steps)
+        {
+            RecordOfflineRollbackStep(deviceId, step, now);
+            MarkOriginalJobRolledBack(step.RollbackOfJobId, deviceId, now);
+        }
+
+        return new OfflineRollbackReconcileResponse
+        {
+            StepsAccepted = request.Steps.Count,
+            StepsRejected = 0,
+            GridX = status.GridX,
+            GridY = status.GridY,
+            Facing = status.Facing,
+            IsGridPoseTrusted = true,
+            Message = status.StatusMessage ?? "Grid pose resynced."
+        };
+    }
+
+    // Applies one reported inverse to the simulated pose. Mirrors ApplyCompletedJobPose so a
+    // step replayed on reconnect lands the robot exactly where reporting it online would have.
+    private static bool TryApplyReportedStep(string commandName, GridPose pose, Map map, out string failure)
+    {
+        failure = string.Empty;
+
+        if (commandName.Equals("LEFT", StringComparison.OrdinalIgnoreCase))
+        {
+            pose.Facing = TurnLeft(pose.Facing!);
+            return true;
+        }
+
+        if (commandName.Equals("RIGHT", StringComparison.OrdinalIgnoreCase))
+        {
+            pose.Facing = TurnRight(pose.Facing!);
+            return true;
+        }
+
+        if (commandName.Equals("MOVE", StringComparison.OrdinalIgnoreCase))
+        {
+            MoveOneCell(pose, +1);
+        }
+        else if (commandName.Equals("STEP_BACK", StringComparison.OrdinalIgnoreCase))
+        {
+            MoveOneCell(pose, -1);
+        }
+        else
+        {
+            // Non-grid commands cannot move the robot, so they reconcile trivially.
+            if (!DomainConstants.RequiresTrustedGridPose(commandName)) return true;
+
+            failure = "command is not a recognised grid movement";
+            return false;
+        }
+
+        if (!IsOnMap(map, pose.X!.Value, pose.Y!.Value))
+        {
+            failure = "it lands outside the map";
+            return false;
+        }
+
+        return true;
+    }
+
+    private OfflineRollbackReconcileResponse RejectReconciliation(DeviceStatus status, int stepCount, string message, DateTime now)
+    {
+        InvalidatePose(status.DeviceId, message, now);
+
+        return new OfflineRollbackReconcileResponse
+        {
+            StepsAccepted = 0,
+            StepsRejected = stepCount,
+            GridX = status.GridX,
+            GridY = status.GridY,
+            Facing = status.Facing,
+            IsGridPoseTrusted = false,
+            Message = message
+        };
+    }
+
+    // Offline steps have no Job row of their own — they were never dispatched — so the history
+    // row is written directly. Without it the robot's offline movements leave no audit trail.
+    private void RecordOfflineRollbackStep(int deviceId, OfflineRollbackStepReport step, DateTime now)
+    {
+        var commandName = step.CommandName.Trim();
+        var commandCatalogueId = _jobDataAccess.GetCommandCatalogueIdByName(commandName);
+        var command = commandCatalogueId.HasValue ? _jobDataAccess.GetCommandCatalogueById(commandCatalogueId.Value) : null;
+
+        _jobHistoryDataAccess.InsertJobHistory(new JobHistory
+        {
+            JobId = null,
+            DeviceId = deviceId,
+            CommandCatalogueId = commandCatalogueId,
+            CommandName = commandName,
+            PayloadJson = string.IsNullOrWhiteSpace(step.PayloadJson) ? "{}" : step.PayloadJson,
+            ProviderType = "Rollback",
+            ExecutionKind = NormalizeExecutionKind(command?.ExecutionKind),
+            RollbackKind = NormalizeRollbackKind(command?.RollbackKind),
+            Executed = true,
+            Success = true,
+            FailureMessage = null,
+            StartedAtUtc = step.ExecutedAtUtc,
+            CompletedAtUtc = step.ExecutedAtUtc ?? now,
+            CreatedDate = now
+        });
+    }
+
+    // The work the robot undid should not stay Completed, or the dashboard shows the robot
+    // having done something it has since reversed.
+    private void MarkOriginalJobRolledBack(int? jobId, int deviceId, DateTime now)
+    {
+        if (!jobId.HasValue) return;
+
+        var job = _jobDataAccess.GetJobById(jobId.Value);
+        if (job == null || job.DeviceId != deviceId) return;
+        if (job.Status.Equals("RolledBack", StringComparison.OrdinalIgnoreCase)) return;
+
+        job.Status = "RolledBack";
+        job.ModifiedDate = now;
+        _jobDataAccess.UpdateJob(job.Id, job);
+    }
+
+    // The inverse handed to the robot alongside the command, for its local undo stack.
+    //
+    // Only Exact-kind commands qualify. BestEffort inverses are timed reversals that
+    // accumulate dead-reckoning error, and an offline robot replaying its stack gets none
+    // of the server-side pre-flight validation that normally catches a bad step — so the
+    // one situation where the inverse is used is the one where it can least be checked.
+    // A missing inverse is a normal answer here, never an error: dispatch must not fail
+    // because a command happens to be irreversible.
+    private (string? CommandName, string? PayloadJson) BuildCachedInverse(Job job)
+    {
+        try
+        {
+            var original = _jobDataAccess.GetCommandCatalogueById(job.CommandCatalogueId);
+            if (original == null) return (null, null);
+
+            var originalCommand = ToCompensationCommand(original);
+            var rollbackKind = CompensationBuilder.ResolveRollbackKind(null, originalCommand);
+            if (!CompensationBuilder.IsExact(rollbackKind)) return (null, null);
+            if (string.IsNullOrWhiteSpace(originalCommand.InverseCommandName)) return (null, null);
+
+            var inverseName = originalCommand.InverseCommandName.Trim();
+            var inverseId = _jobDataAccess.GetCommandCatalogueIdByName(inverseName);
+            if (!inverseId.HasValue) return (null, null);
+
+            var inverse = _jobDataAccess.GetCommandCatalogueById(inverseId.Value);
+            if (inverse == null || !inverse.IsActive) return (null, null);
+
+            // The robot can only replay what it is physically capable of executing.
+            if (_jobDataAccess.GetActiveDeviceCapability(job.DeviceId, inverse.Id) == null) return (null, null);
+
+            var inverseCommand = ToCompensationCommand(inverse);
+            var payload = CompensationBuilder.TransformPayload(originalCommand, inverseCommand, job.PayloadJson, null, rollbackKind);
+            return (inverse.Name, payload);
+        }
+        catch (InvalidOperationException)
+        {
+            // No transformable payload (e.g. a required duration the job never carried).
+            return (null, null);
+        }
+    }
+
+    private static CompensationCommand ToCompensationCommand(CommandCatalogueSnapshot snapshot) => new(
+        snapshot.Name,
+        snapshot.ExecutionKind,
+        snapshot.RollbackKind,
+        snapshot.InverseCommandName,
+        snapshot.RequiresDuration);
 
     private DispatchDecision PrepareQueuedJobForDispatch(Job job, DateTime now)
     {

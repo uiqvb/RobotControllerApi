@@ -151,6 +151,14 @@ public class JobService : IJobService
 
         InsertHistory(existing, true, true, resultJson, null, null);
         ApplyCompletedJobPose(existing);
+
+        // A standalone rollback job has no workflow to finalize, so this is the only moment
+        // its original can be marked reversed.
+        if (existing.IsRollback && !existing.WorkflowId.HasValue)
+        {
+            MarkOriginalsRolledBack(new[] { existing }, existing.ModifiedDate);
+        }
+
         if (existing.WorkflowId.HasValue) FinalizeParentWorkflowIfReady(existing.WorkflowId.Value, DateTime.UtcNow);
         return true;
     }
@@ -242,6 +250,67 @@ public class JobService : IJobService
         workflow.ModifiedDate = now;
         _workflowDataAccess.UpdateWorkflow(workflow.Id, workflow);
         InsertWorkflowHistoryIfMissing(workflow, success, jobs.FirstOrDefault(x => !x.Status.Equals("Completed", StringComparison.OrdinalIgnoreCase))?.StepNumber, success ? null : "Workflow finished with failed steps.", now);
+
+        // Only a rollback that actually finished reverses anything. A failed one leaves the
+        // original standing, which is the honest record.
+        if (workflow.IsRollback && success)
+        {
+            MarkOriginalsRolledBack(jobs, now);
+        }
+    }
+
+    // Marks the work a completed rollback has undone, so the original stops reading as though
+    // it still stands. Without this the RolledBack status was never written by anything: the
+    // original workflow sat at Completed forever, and nothing recorded that it had been reversed.
+    //
+    // The link is each rollback job's RollbackOfJobHistoryId, which points at the history row of
+    // the step it reverses. That row carries both the original job and its workflow, so one
+    // lookup covers jobs and workflows on both rollback paths.
+    private void MarkOriginalsRolledBack(IEnumerable<Job> rollbackJobs, DateTime now)
+    {
+        var historyIds = rollbackJobs
+            .Where(x => x.IsRollback && x.RollbackOfJobHistoryId.HasValue)
+            .Select(x => x.RollbackOfJobHistoryId!.Value)
+            .Distinct()
+            .ToList();
+
+        if (historyIds.Count == 0) return;
+
+        var originalJobIds = new HashSet<int>();
+        var originalWorkflowIds = new HashSet<int>();
+
+        foreach (var historyId in historyIds)
+        {
+            var history = _jobHistoryDataAccess.GetJobHistoryById(historyId);
+            if (history == null) continue;
+            if (history.JobId.HasValue) originalJobIds.Add(history.JobId.Value);
+            if (history.WorkflowId.HasValue) originalWorkflowIds.Add(history.WorkflowId.Value);
+        }
+
+        foreach (var jobId in originalJobIds)
+        {
+            var job = _dataAccess.GetJobById(jobId);
+
+            // Only completed work can have been undone. A step that failed or was cancelled
+            // never happened, so there is nothing to reverse and its status stays as it is.
+            if (job == null || job.IsRollback) continue;
+            if (!job.Status.Equals("Completed", StringComparison.OrdinalIgnoreCase)) continue;
+
+            job.Status = "RolledBack";
+            job.ModifiedDate = now;
+            _dataAccess.UpdateJob(job.Id, job);
+        }
+
+        foreach (var workflowId in originalWorkflowIds)
+        {
+            var workflow = _workflowDataAccess.GetWorkflowById(workflowId);
+            if (workflow == null || workflow.IsRollback) continue;
+            if (!workflow.Status.Equals("Completed", StringComparison.OrdinalIgnoreCase)) continue;
+
+            workflow.Status = "RolledBack";
+            workflow.ModifiedDate = now;
+            _workflowDataAccess.UpdateWorkflow(workflow.Id, workflow);
+        }
     }
 
     private void CancelQueuedWorkflowJobs(int workflowId, DateTime now)

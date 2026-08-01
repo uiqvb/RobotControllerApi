@@ -231,10 +231,10 @@ public class RollbackService : IRollbackService
 
             if (originalCommandName == "PLACE") break;
 
-            var rollbackKind = ResolveRollbackKind(history, originalCommand);
-            if (rollbackKind.Equals("None", StringComparison.OrdinalIgnoreCase)) continue;
+            var rollbackKind = CompensationBuilder.ResolveRollbackKind(history.RollbackKind, ToCompensationCommand(originalCommand));
+            if (CompensationBuilder.IsNone(rollbackKind)) continue;
 
-            if (!rollbackKind.Equals("Exact", StringComparison.OrdinalIgnoreCase) && !rollbackKind.Equals("BestEffort", StringComparison.OrdinalIgnoreCase))
+            if (!CompensationBuilder.IsReversible(rollbackKind))
             {
                 throw new InvalidOperationException($"Unsupported RollbackKind {rollbackKind} for command {originalCommand.Name}.");
             }
@@ -261,7 +261,14 @@ public class RollbackService : IRollbackService
                 throw new InvalidOperationException($"Rollback command {inverseCommand.Name} requires trusted and aligned device pose.");
             }
 
-            result.Add(new RollbackStep(inverseCommand.Id, TransformPayload(history, originalCommand, inverseCommand, rollbackKind), history.Id));
+            var payloadJson = CompensationBuilder.TransformPayload(
+                ToCompensationCommand(originalCommand),
+                ToCompensationCommand(inverseCommand),
+                history.PayloadJson,
+                history.DurationMs,
+                rollbackKind);
+
+            result.Add(new RollbackStep(inverseCommand.Id, payloadJson, history.Id));
         }
 
         return result;
@@ -284,100 +291,12 @@ public class RollbackService : IRollbackService
         throw new InvalidOperationException($"No active CommandCatalogue row exists for history id {history.Id}.");
     }
 
-    private static string ResolveRollbackKind(JobHistory history, CommandCatalogue originalCommand)
-    {
-        if (!string.IsNullOrWhiteSpace(history.RollbackKind))
-        {
-            return history.RollbackKind.Trim();
-        }
-
-        return originalCommand.RollbackKind.Trim();
-    }
-
-    private static string TransformPayload(JobHistory history, CommandCatalogue originalCommand, CommandCatalogue inverseCommand, string rollbackKind)
-    {
-        var node = JsonNode.Parse(string.IsNullOrWhiteSpace(history.PayloadJson) ? "{}" : history.PayloadJson) as JsonObject ?? new JsonObject();
-
-        var originalName = originalCommand.Name.Trim().ToUpperInvariant();
-        var inverseName = inverseCommand.Name.Trim().ToUpperInvariant();
-
-        if (originalName == inverseName)
-        {
-            if (originalName == "DRIVE_DISTANCE") NegateNumber(node, "distance", "distanceCm", "centimeters", "value");
-            if (originalName == "ROTATE_DEGREES") NegateNumber(node, "degrees", "angleDegrees", "value");
-        }
-
-        var durationMs = history.DurationMs ?? TryGetInt(node, "durationMs", "duration", "milliseconds", "ms");
-        var shouldPreserveDuration =
-            inverseCommand.RequiresDuration ||
-            originalCommand.ExecutionKind.Equals("Continuous", StringComparison.OrdinalIgnoreCase) ||
-            inverseCommand.ExecutionKind.Equals("Continuous", StringComparison.OrdinalIgnoreCase) ||
-            rollbackKind.Equals("BestEffort", StringComparison.OrdinalIgnoreCase);
-
-        if (shouldPreserveDuration)
-        {
-            if (!durationMs.HasValue || durationMs.Value <= 0)
-            {
-                throw new InvalidOperationException($"Rollback command {inverseCommand.Name} requires a valid durationMs value.");
-            }
-
-            node["durationMs"] = durationMs.Value;
-        }
-
-        return node.ToJsonString(new JsonSerializerOptions { WriteIndented = false });
-    }
-
-    private static int? TryGetInt(JsonObject node, params string[] propertyNames)
-    {
-        foreach (var name in propertyNames)
-        {
-            if (!node.TryGetPropertyValue(name, out var value) || value == null) continue;
-
-            try
-            {
-                return value.GetValue<int>();
-            }
-            catch (InvalidOperationException)
-            {
-                try
-                {
-                    return Convert.ToInt32(value.GetValue<double>());
-                }
-                catch
-                {
-                    // Ignore and continue to the next possible property name.
-                }
-            }
-            catch (FormatException)
-            {
-                continue;
-            }
-        }
-
-        return null;
-    }
-
-    private static void NegateNumber(JsonObject node, params string[] propertyNames)
-    {
-        foreach (var name in propertyNames)
-        {
-            if (!node.TryGetPropertyValue(name, out var value) || value == null) continue;
-            try
-            {
-                var number = value.GetValue<double>();
-                node[name] = -number;
-                return;
-            }
-            catch (InvalidOperationException)
-            {
-                continue;
-            }
-            catch (FormatException)
-            {
-                continue;
-            }
-        }
-    }
+    private static CompensationCommand ToCompensationCommand(CommandCatalogue command) => new(
+        command.Name,
+        command.ExecutionKind,
+        command.RollbackKind,
+        command.InverseCommandName,
+        command.RequiresDuration);
 
     private static string SerializeIds(List<int> ids) => JsonSerializer.Serialize(ids.OrderBy(x => x).ToList());
 
