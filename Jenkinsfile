@@ -204,6 +204,22 @@ apt-get update -qq
 apt-get install -y -qq --no-install-recommends openjdk-17-jre-headless > /dev/null
 java -version
 
+echo "--- copying source out of the bind mount ---"
+# MSBuild cannot write bin/ into a Windows bind mount from inside a Linux
+# container - it fails with MSB3021 "Access to the path is denied" on every
+# Content file it tries to copy. The analysis therefore runs against a copy on
+# the container's own filesystem. Nothing needs to come back to the host: the
+# scanner uploads its results to SonarCloud directly.
+mkdir -p /build
+cp -a /src/. /build/
+cd /build
+# Build leftovers, the archived image tarball, and monitoring config, which is
+# infrastructure rather than application content and would otherwise be pulled
+# into the compile as a Content item.
+rm -rf /build/bin /build/obj /build/.sonarqube /build/testresults /build/monitoring
+rm -f /build/*.tar
+ls -la /build | head -30
+
 echo "--- installing dotnet-sonarscanner ---"
 dotnet tool install --global dotnet-sonarscanner
 export PATH="$PATH:/root/.dotnet/tools"
