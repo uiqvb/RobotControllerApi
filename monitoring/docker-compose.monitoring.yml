@@ -44,6 +44,21 @@ services:
     networks:
       - monitoring
 
+  # The receiving end of the alert path. Alertmanager routes here, this logs the
+  # delivery, so `docker logs robot-alert-logger` proves an alert was actually
+  # dispatched rather than only raised. See alert-logger.py for why.
+  alert-logger:
+    image: python:3.12-alpine
+    container_name: robot-alert-logger
+    restart: unless-stopped
+    ports:
+      - "5001:5001"
+    volumes:
+      - ./alert-logger.py:/app/alert-logger.py:ro
+    command: ["python", "-u", "/app/alert-logger.py"]
+    networks:
+      - monitoring
+
   blackbox:
     image: prom/blackbox-exporter:v0.25.0
     container_name: robot-blackbox
