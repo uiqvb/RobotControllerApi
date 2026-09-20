@@ -341,8 +341,11 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                 }
 
                 script {
-                    def prev = readFile(file: "${DEPLOY_STATE}\\staging-last-good.txt").trim()
-                    echo "Previous known-good staging tag: ${prev ?: 'none (first deploy)'}"
+                    // On the first ever deploy there is no previous tag to roll back to,
+                    // so the state file will not exist yet.
+                    def stateFile = "${DEPLOY_STATE}\\staging-last-good.txt"
+                    def prev = fileExists(stateFile) ? readFile(file: stateFile).trim() : ''
+                    echo "Previous known-good staging tag: ${prev ?: 'none - this is the first deploy'}"
                 }
 
                 bat """
@@ -369,7 +372,8 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
 
                     if (!healthy) {
                         echo '*** STAGING HEALTH CHECK FAILED - ROLLING BACK ***'
-                        def prev = readFile(file: "${DEPLOY_STATE}\\staging-last-good.txt").trim()
+                        def stateFile = "${DEPLOY_STATE}\\staging-last-good.txt"
+                        def prev = fileExists(stateFile) ? readFile(file: stateFile).trim() : ''
                         if (!prev) {
                             error 'Health check failed and there is no previous good tag to roll back to.'
                         }
@@ -438,7 +442,8 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
 
                     if (!healthy) {
                         echo '*** PRODUCTION HEALTH CHECK FAILED - ROLLING BACK ***'
-                        def prev = readFile(file: "${DEPLOY_STATE}\\prod-last-good.txt").trim()
+                        def stateFile = "${DEPLOY_STATE}\\prod-last-good.txt"
+                        def prev = fileExists(stateFile) ? readFile(file: stateFile).trim() : ''
                         if (!prev) { error 'Production health check failed with no previous good tag.' }
                         bat """
                             set IMAGE_TAG=${prev}
