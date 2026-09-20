@@ -1,0 +1,40 @@
+# SIT223 7.3HD - Alertmanager configuration
+#
+# Routes by severity. The webhook receiver is a local sink so alerts are visibly
+# dispatched without depending on email or Slack during a demo - the Alertmanager
+# UI at :9093 is what gets shown on camera.
+
+global:
+  resolve_timeout: 1m
+
+route:
+  receiver: 'default'
+  group_by: ['alertname', 'environment']
+  group_wait: 10s
+  group_interval: 30s
+  repeat_interval: 5m
+  routes:
+    - matchers:
+        - severity = "critical"
+      receiver: 'critical'
+      group_wait: 5s
+      repeat_interval: 2m
+
+receivers:
+  - name: 'default'
+    webhook_configs:
+      - url: 'http://127.0.0.1:9093/-/reload'
+        send_resolved: true
+
+  - name: 'critical'
+    webhook_configs:
+      - url: 'http://127.0.0.1:9093/-/reload'
+        send_resolved: true
+
+inhibit_rules:
+  # If production is down, don't also spam about its latency.
+  - source_matchers:
+      - alertname = "ProductionDown"
+    target_matchers:
+      - alertname = "HighResponseLatency"
+    equal: ['environment']

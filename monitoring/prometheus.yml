@@ -1,0 +1,63 @@
+# SIT223 7.3HD - Prometheus configuration
+#
+# Scrapes three things:
+#   1. itself           - so there is always a healthy target
+#   2. blackbox_exporter - probing staging and production /health from outside the
+#                          containers, giving uptime and response latency with no
+#                          instrumentation in the application
+#   3. cAdvisor          - per-container CPU, memory and restart counts
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'robotcontroller-monitor'
+
+rule_files:
+  - /etc/prometheus/alert-rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+scrape_configs:
+
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+
+  # Probe the running applications over HTTP via blackbox_exporter.
+  - job_name: 'blackbox-health'
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - http://host.docker.internal:8091/health   # PRODUCTION
+        labels:
+          environment: production
+      - targets:
+          - http://host.docker.internal:8090/health   # STAGING
+        labels:
+          environment: staging
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115
+
+  # OPTIONAL - only if you add the prometheus-net.AspNetCore package to the app.
+  # Gives real request rate, error rate by status code, and request duration.
+  # - job_name: 'robotcontroller-app'
+  #   static_configs:
+  #     - targets: ['host.docker.internal:8091']
+  #       labels:
+  #         environment: production
+  #   metrics_path: /metrics
