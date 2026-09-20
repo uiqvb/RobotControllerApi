@@ -135,24 +135,19 @@ pipeline {
                 '''
 
                 echo '--- Integration tests (against the production image) ---'
-                script {
-                    // Join the test network so tests reach the app by service name.
-                    def testNet = bat(
-                        script: '@docker network ls --filter name=test --format "{{.Name}}" | findstr /i test',
-                        returnStdout: true
-                    ).trim().readLines()[0]
-
-                    bat """
-                        docker run --rm ^
-                            --network ${testNet} ^
-                            -e API_BASE_URL=http://robot-test-app:8080 ^
-                            -v "%WORKSPACE%\\testresults:/testresults" ^
-                            %IMAGE_NAME%:%TEST_IMAGE_TAG% ^
-                            dotnet test --filter "Category=Integration" ^
-                                --logger "junit;LogFilePath=/testresults/integration-results.xml" ^
-                                --results-directory /testresults
-                    """
-                }
+                // Network name and flags below are the exact combination verified working
+                // locally: the test image already defaults API_BASE_URL to the compose
+                // service name, and the test project is built in the image, so --no-build
+                // keeps this to a few seconds instead of recompiling.
+                bat """
+                    docker run --rm ^
+                        --network robot-test-net ^
+                        -v "%WORKSPACE%\\testresults:/testresults" ^
+                        %IMAGE_NAME%:%TEST_IMAGE_TAG% ^
+                        dotnet test -c Release --no-build --filter "Category=Integration" ^
+                            --logger "junit;LogFilePath=/testresults/integration-results.xml" ^
+                            --results-directory /testresults
+                """
 
                 // GUARD: refuse a green build that tested nothing.
                 powershell '''

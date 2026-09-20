@@ -6,6 +6,16 @@
     <UserSecretsId>61e2bf2d-6218-4286-ac22-8c9d14bf1ee4</UserSecretsId>
   </PropertyGroup>
   <ItemGroup>
+    <!-- The test project lives under tests/ inside this project's directory, so the
+         SDK's default **/*.cs glob would otherwise compile the tests (and their obj/
+         output) into the application assembly. -->
+    <Compile Remove="tests/**" />
+    <Content Remove="tests/**" />
+    <None Remove="tests/**" />
+    <EmbeddedResource Remove="tests/**" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="FastMember" Version="1.5.0" />
     <PackageReference Include="Npgsql" Version="8.0.3" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="8.0.4" />

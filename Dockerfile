@@ -9,6 +9,7 @@ WORKDIR /src
 # The project file alone first, so `dotnet restore` is cached against dependency
 # changes rather than against every source edit.
 COPY RobotControllerApi.csproj ./
+COPY tests/RobotControllerApi.Tests/RobotControllerApi.Tests.csproj tests/RobotControllerApi.Tests/
 RUN dotnet restore RobotControllerApi.csproj
 
 COPY . .
@@ -21,14 +22,27 @@ RUN dotnet build RobotControllerApi.csproj -c Release --no-restore
 # suite inside. It keeps everything the production image drops: the SDK, the
 # test host, and the sources a test project compiles against.
 #
-# NOTE: this repository contains no test project yet. The image is the place to
-# run one from; the suite itself is not supplied here.
+# The suite lives in tests/RobotControllerApi.Tests and is restored and built
+# here, so `docker run` on this image reports a real, non-zero test count.
 # ---------------------------------------------------------------------------
 FROM build AS test
-WORKDIR /src
+
+# The test project and its dev-only dependencies, restored and built here rather
+# than in the shared build stage so none of it can reach the production image.
+RUN dotnet restore tests/RobotControllerApi.Tests/RobotControllerApi.Tests.csproj \
+    && dotnet build tests/RobotControllerApi.Tests/RobotControllerApi.Tests.csproj -c Release --no-restore
+
+# The test project, so a bare `dotnet test` resolves to it and the pipeline's
+# commands work verbatim:
+#   docker run --rm myapp:test-1.0.1 dotnet test --filter "Category!=Integration"
+#   docker run --rm myapp:test-1.0.1 dotnet test --filter "Category=Integration"
+WORKDIR /src/tests/RobotControllerApi.Tests
+
 ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 \
-    DOTNET_NOLOGO=1
-CMD ["dotnet", "test", "--logger:trx;LogFileName=test-results.trx", "--results-directory", "/src/TestResults"]
+    DOTNET_NOLOGO=1 \
+    API_BASE_URL=http://robot-test-app:8080
+
+CMD ["dotnet", "test", "-c", "Release", "--no-build", "--filter", "Category!=Integration", "--logger:junit;LogFilePath=/src/TestResults/unit-results.xml"]
 
 # ---------------------------------------------------------------------------
 # Stage 3: publish - trimmed, runtime-ready output
