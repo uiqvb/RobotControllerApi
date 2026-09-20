@@ -452,14 +452,19 @@ async function unassignMap(){
 
 /* live drive - ported unchanged from the previous console */
 async function startLiveSession(){ if(state.liveSessionId) return state.liveSessionId; const s=await api('/api/devices/'+state.deviceId+'/live-control-sessions/start',{method:'POST',body:'{}'}); state.liveSessionId=s.id; return s.id }
-async function sendLive(cmd){ cmd=norm(cmd); const sid=await startLiveSession(); return api('/api/devices/'+state.deviceId+'/live-control-command',{method:'PUT',body:JSON.stringify({liveControlSessionId:sid,commandName:cmd,payloadJson:'{}',sequenceNumber:state.liveSeq++,expiresInMs:650})}) }
+// LIVE_REFRESH_MS: how often a held key is re-sent. LIVE_EXPIRES_MS: how long the robot should
+// keep moving on one command if the refreshes stop. Keep the expiry at roughly 3x the refresh -
+// too tight and the motors stutter between refreshes, too loose and a dead browser leaves the
+// robot driving. The firmware's LIVE_CONTROL_STALE_MS fallback is kept at the same value.
+const LIVE_REFRESH_MS=150, LIVE_EXPIRES_MS=450;
+async function sendLive(cmd){ cmd=norm(cmd); const sid=await startLiveSession(); return api('/api/devices/'+state.deviceId+'/live-control-command',{method:'PUT',body:JSON.stringify({liveControlSessionId:sid,commandName:cmd,payloadJson:'{}',sequenceNumber:state.liveSeq++,expiresInMs:LIVE_EXPIRES_MS})}) }
 function stopLiveInterval(){ if(state.liveInterval) clearInterval(state.liveInterval); state.liveInterval=null; state.liveCommand=null }
 async function startLiveHold(cmd){
   if(!LIVE_CMDS.every(hasCap)) return toast('This robot has no live-control capability.','warn');
   if(state.liveCommand===cmd && state.liveInterval) return;
   stopLiveInterval();
   try{ state.liveCommand=cmd; await sendLive(cmd);
-    state.liveInterval=setInterval(function(){ sendLive(cmd).catch(function(e){ log('Live refresh failed: '+e.message,'error'); stopLive() }) },220);
+    state.liveInterval=setInterval(function(){ sendLive(cmd).catch(function(e){ log('Live refresh failed: '+e.message,'error'); stopLive() }) },LIVE_REFRESH_MS);
   }catch(e){ toast(e.message,'error'); stopLiveInterval() }
 }
 async function stopLive(){
