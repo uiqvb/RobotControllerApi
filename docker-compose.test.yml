@@ -1,0 +1,62 @@
+# Integration-test environment.
+#
+# Runs the PRODUCTION image - not a test build - against a throwaway database,
+# so whatever the suite exercises is the same artefact that later reaches
+# staging and production. The only difference is what it is pointed at.
+#
+# Self-contained by design: the credentials below are defaults for a database
+# that is created and destroyed with the stack, so no .env file is needed to
+# run it. Override any of them from the environment if you want to.
+name: robot-test
+
+services:
+  db:
+    image: postgres:18-alpine
+    container_name: robot-test-db
+    environment:
+      POSTGRES_DB: ${TEST_DB_NAME:-robotcontroller_test}
+      POSTGRES_USER: ${TEST_DB_USER:-robot_test}
+      POSTGRES_PASSWORD: ${TEST_DB_PASSWORD:-throwaway_test_password}
+    volumes:
+      # postgres:18+ stores data in a major-version subdirectory and refuses to
+      # start if the mount lands on /var/lib/postgresql/data instead.
+      - test-pgdata:/var/lib/postgresql
+      - ./Infrastructure/DataAccess/Database/Final_project_schema_refactored.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./Infrastructure/DataAccess/Database/Final_project_reference_data_refactored.sql:/docker-entrypoint-initdb.d/02-reference-data.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TEST_DB_USER:-robot_test} -d ${TEST_DB_NAME:-robotcontroller_test}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - test-net
+
+  app:
+    image: myapp:${IMAGE_TAG:-latest}
+    container_name: robot-test-app
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Staging}
+      ASPNETCORE_HTTP_PORTS: ${APP_PORT:-8080}
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${TEST_DB_NAME:-robotcontroller_test}
+      DB_USER: ${TEST_DB_USER:-robot_test}
+      DB_PASSWORD: ${TEST_DB_PASSWORD:-throwaway_test_password}
+      Persistence__Provider: ${PERSISTENCE_PROVIDER:-ADO}
+      RequestLogging__Enabled: ${REQUEST_LOGGING_ENABLED:-false}
+    ports:
+      - "${TEST_APP_HOST_PORT:-8092}:${APP_PORT:-8080}"
+    networks:
+      - test-net
+
+volumes:
+  test-pgdata:
+    name: robot-test-pgdata
+
+networks:
+  test-net:
+    name: robot-test-net

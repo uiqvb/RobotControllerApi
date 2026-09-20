@@ -1,0 +1,64 @@
+# Production environment.
+#
+# Identical to staging in every respect except the values it is given: same
+# image tag, different port, different volume, different network, different
+# container names. Deliberately does NOT build - the pipeline builds one image
+# and every environment runs that exact artefact.
+name: robot-prod
+
+services:
+  db:
+    image: postgres:18-alpine
+    container_name: robot-prod-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      # postgres:18+ stores data in a major-version subdirectory and refuses to
+      # start if the mount lands on /var/lib/postgresql/data instead.
+      - prod-pgdata:/var/lib/postgresql
+      # Runs once, on first init of an empty volume. Read-only: the schema is an
+      # input to the database, not something the container should edit.
+      - ./Infrastructure/DataAccess/Database/Final_project_schema_refactored.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./Infrastructure/DataAccess/Database/Final_project_reference_data_refactored.sql:/docker-entrypoint-initdb.d/02-reference-data.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - prod-net
+
+  app:
+    image: myapp:${IMAGE_TAG:-latest}
+    container_name: robot-prod-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+      ASPNETCORE_HTTP_PORTS: ${APP_PORT}
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      Persistence__Provider: ${PERSISTENCE_PROVIDER}
+      RequestLogging__Enabled: ${REQUEST_LOGGING_ENABLED}
+      WorkDispatch__LeaseMinutes: ${WORK_DISPATCH_LEASE_MINUTES}
+    ports:
+      - "${APP_HOST_PORT}:${APP_PORT}"
+    networks:
+      - prod-net
+
+volumes:
+  prod-pgdata:
+    name: robot-prod-pgdata
+
+networks:
+  prod-net:
+    name: robot-prod-net

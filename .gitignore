@@ -1,3 +1,12 @@
+# Real environment files for the containerised deployments. The .example
+# files beside them are committed; these hold actual credentials.
+.env
+.env.staging
+.env.prod
+.env.test
+!.env.staging.example
+!.env.prod.example
+
 # Local dev secrets — never commit
 RobotControllerApi_BASIC_SECRETS_README.md
 docs/archive/RobotControllerApi_BASIC_SECRETS_README.md
