@@ -189,30 +189,66 @@ pipeline {
         // =====================================================================
         stage('Code Quality') {
             steps {
+                // The scan runs from a script file rather than an inline `bash -c`.
+                // Nested quoting across Groovy -> cmd -> bash is where this stage broke
+                // first time: $PATH was interpolated by Groovy and the Windows PATH was
+                // injected into the container, wiping dotnet off the PATH.
+                // A file has exactly one layer of quoting and no escaping at all.
+                writeFile file: 'sonar-scan.sh', text: '''#!/bin/bash
+set -euo pipefail
+
+# dotnet-sonarscanner is a Java application. The .NET SDK image ships no JRE,
+# so install a headless one before doing anything else.
+echo "--- installing JRE for the scanner ---"
+apt-get update -qq
+apt-get install -y -qq --no-install-recommends openjdk-17-jre-headless > /dev/null
+java -version
+
+echo "--- installing dotnet-sonarscanner ---"
+dotnet tool install --global dotnet-sonarscanner
+export PATH="$PATH:/root/.dotnet/tools"
+
+echo "--- sonarscanner begin ---"
+dotnet sonarscanner begin \\
+    /k:"$SONAR_PROJECT" \\
+    /o:"$SONAR_ORG" \\
+    /d:sonar.host.url="$SONAR_HOST" \\
+    /d:sonar.token="$SONAR_TOKEN" \\
+    /d:sonar.exclusions="**/bin/**,**/obj/**,**/Migrations/**,**/*.sql,**/wwwroot/**,**/TestResults/**" \\
+    /d:sonar.qualitygate.wait=true
+
+echo "--- build under analysis ---"
+dotnet build --no-incremental
+
+echo "--- sonarscanner end (this is where the quality gate blocks) ---"
+dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
+'''
+                // Single-quoted Groovy string: no interpolation, so the token is never
+                // baked into the command line. cmd expands the %VARS%, and the secret
+                // reaches the container only through -e.
                 withCredentials([string(credentialsId: 'SONAR_TOKEN', variable: 'SONAR_TOKEN')]) {
-                    bat """
+                    bat '''
                         docker run --rm ^
                             -v "%WORKSPACE%:/src" ^
                             -w /src ^
-                            -e SONAR_TOKEN=%SONAR_TOKEN% ^
+                            -e SONAR_TOKEN ^
+                            -e SONAR_PROJECT=%SONAR_PROJECT% ^
+                            -e SONAR_ORG=%SONAR_ORG% ^
+                            -e SONAR_HOST=%SONAR_HOST% ^
                             %DOTNET_SDK% ^
-                            bash -c "export PATH=\\\"\\$PATH:/root/.dotnet/tools\\\" && \
-                                dotnet tool install --global dotnet-sonarscanner && \
-                                dotnet sonarscanner begin \
-                                    /k:'%SONAR_PROJECT%' \
-                                    /o:'%SONAR_ORG%' \
-                                    /d:sonar.host.url='%SONAR_HOST%' \
-                                    /d:sonar.token='\\$SONAR_TOKEN' \
-                                    /d:sonar.exclusions='**/bin/**,**/obj/**,**/Migrations/**,**/*.sql,**/wwwroot/**' \
-                                    /d:sonar.qualitygate.wait=true && \
-                                dotnet build --no-incremental && \
-                                dotnet sonarscanner end /d:sonar.token='\\$SONAR_TOKEN'"
-                    """
+                            bash /src/sonar-scan.sh
+                    '''
                 }
                 echo "Quality gate passed. Trend: ${SONAR_HOST}/project/activity?id=${SONAR_PROJECT}"
             }
             post {
-                failure { echo 'QUALITY GATE FAILED - code health below threshold, pipeline stops' }
+                always  { bat 'del /Q "%WORKSPACE%\\sonar-scan.sh" 2>nul || exit /b 0' }
+                failure {
+                    echo '''CODE QUALITY STAGE FAILED. Likely causes, in order:
+  1. SonarCloud project does not exist yet, or the key/org is wrong
+  2. Automatic Analysis is still enabled on the SonarCloud project
+  3. The quality gate genuinely failed - check the dashboard'''
+                }
             }
         }
 
