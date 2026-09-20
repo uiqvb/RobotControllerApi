@@ -776,6 +776,32 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                     if (-not $ok) { Write-Error "Prometheus targets never came up"; exit 1 }
                 '''
 
+                // Compose does not recreate a container when only the *contents* of a
+                // bind-mounted config file change - it compares the mount spec, not the
+                // file. So an edit to prometheus.yml, alert-rules.yml or alertmanager.yml
+                // is committed, deployed, and then silently ignored by the process that
+                // is already running, potentially for days. Both services expose a reload
+                // endpoint; calling it every run makes the committed config the running
+                // config, which is the whole point of keeping it in the repo.
+                powershell '''
+                    $targets = @(
+                        @{ name = "prometheus";   url = "http://localhost:9090/-/reload" },
+                        @{ name = "alertmanager"; url = "http://localhost:9093/-/reload" }
+                    )
+                    foreach ($t in $targets) {
+                        $done = $false
+                        for ($i = 0; $i -lt 6; $i++) {
+                            try {
+                                Invoke-WebRequest -Uri $t.url -Method Post -UseBasicParsing -TimeoutSec 10 | Out-Null
+                                Write-Host "  reloaded $($t.name) config"
+                                $done = $true
+                                break
+                            } catch { Start-Sleep -Seconds 5 }
+                        }
+                        if (-not $done) { Write-Error "Could not reload $($t.name) - it may be running a stale config"; exit 1 }
+                    }
+                '''
+
                 powershell '''
                     $rules = Invoke-RestMethod -Uri "http://localhost:9090/api/v1/rules" -TimeoutSec 10
                     Write-Host "Loaded alert rules:"
