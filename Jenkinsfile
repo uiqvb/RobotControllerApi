@@ -567,9 +567,19 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                         # 3. The container's own HEALTHCHECK agrees. This is a different
                         #    signal from the HTTP poll above: it is Docker probing from
                         #    inside, and compose dependency ordering relies on it.
-                        $state = (docker inspect --format "{{.State.Health.Status}}" robot-staging-app) | Select-Object -Last 1
-                        if ($state.Trim() -eq "healthy") { Write-Host "  [pass] container HEALTHCHECK reports healthy" }
-                        else { $failures += "container health status is '$($state.Trim())', expected 'healthy'" }
+                        #    The container was recreated seconds ago and the image's
+                        #    HEALTHCHECK has --start-period=20s --interval=15s, so
+                        #    "starting" here means the first probe has not run yet, not
+                        #    that anything is wrong. Wait for a verdict instead of
+                        #    sampling before there is one.
+                        $state = "starting"
+                        for ($i = 0; $i -lt 24; $i++) {
+                            $state = ((docker inspect --format "{{.State.Health.Status}}" robot-staging-app) | Select-Object -Last 1).Trim()
+                            if ($state -ne "starting") { break }
+                            Start-Sleep -Seconds 5
+                        }
+                        if ($state -eq "healthy") { Write-Host "  [pass] container HEALTHCHECK reports healthy (after $($i*5)s)" }
+                        else { $failures += "container health status is '$state', expected 'healthy'" }
 
                         if ($failures.Count -gt 0) {
                             Write-Host ""
@@ -667,9 +677,15 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                             else               { $failures += "unauthenticated /api/maps returned $code, expected 401" }
                         }
 
-                        $state = (docker inspect --format "{{.State.Health.Status}}" robot-prod-app) | Select-Object -Last 1
-                        if ($state.Trim() -eq "healthy") { Write-Host "  [pass] container HEALTHCHECK reports healthy" }
-                        else { $failures += "container health status is '$($state.Trim())', expected 'healthy'" }
+                        # Same start-period wait as staging - see the comment there.
+                        $state = "starting"
+                        for ($i = 0; $i -lt 24; $i++) {
+                            $state = ((docker inspect --format "{{.State.Health.Status}}" robot-prod-app) | Select-Object -Last 1).Trim()
+                            if ($state -ne "starting") { break }
+                            Start-Sleep -Seconds 5
+                        }
+                        if ($state -eq "healthy") { Write-Host "  [pass] container HEALTHCHECK reports healthy (after $($i*5)s)" }
+                        else { $failures += "container health status is '$state', expected 'healthy'" }
 
                         if ($failures.Count -gt 0) {
                             Write-Host ""
