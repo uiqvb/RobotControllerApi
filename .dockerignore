@@ -1,0 +1,60 @@
+# Build output - rebuilt inside the image; copying it in risks a host-built
+# binary shadowing the container build and breaks restore-layer caching.
+bin/
+obj/
+publish/
+**/bin/
+**/obj/
+
+# Local secrets and environment files. These must never enter an image: the
+# whole point of the env-var configuration is that the image stays neutral.
+.env
+.env.*
+!.env.*.example
+*.secrets.json
+appsettings.*.local.json
+RobotControllerApi_BASIC_SECRETS_README.md
+
+# Firmware - separate repo, and the sketches carry plaintext WiFi and device
+# credentials.
+Firmware/
+*.ino
+code_final*
+
+# Version control and CI metadata
+.git/
+.gitignore
+.github/
+
+# Editor / IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.lscache
+
+# Local working notes, not part of the deployable app
+CLAUDE.md
+.claude/
+docs/
+context.md
+*.md
+!README.md
+
+# Docker's own files - not needed inside the build context
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# Dashboard backups and stray archives
+wwwroot/*.backup.html
+wwwroot/index.5tab-backup.html
+*.zip
+
+# OS noise
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+*.DS_Store
+*.log
