@@ -5,7 +5,7 @@ public class Device
     public int Id { get; set; } = 0;
     public string Name { get; set; } = string.Empty;
     public string DeviceIdentifier { get; set; } = string.Empty;
-    public string DeviceType { get; set; } = string.Empty;
+    public string DeviceType { get; set; } = string.Empty; //Useless as of now, idea was to develop a system that has types of devices, EG: solarbot, Gridbot, Linetrackerbot etc
     public int? MapId { get; set; } = null;
     public string? Description { get; set; } = null;
     public bool IsActive { get; set; } = true;

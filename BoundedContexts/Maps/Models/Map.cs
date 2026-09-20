@@ -6,7 +6,7 @@ public class Map
     public string Name { get; set; } = string.Empty;
     public int Columns { get; set; } = 0;
     public int Rows { get; set; } = 0;
-    public double CellSizeCm { get; set; } = 0;
+    public double CellSizeCm { get; set; } = 0; //useless right now, idea was to have custom sized maps and make real world robot move that many cm as the map. 
     public string? Description { get; set; } = null;
     public bool IsActive { get; set; } = true;
     public DateTime CreatedDate { get; set; }

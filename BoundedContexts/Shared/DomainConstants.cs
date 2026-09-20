@@ -10,7 +10,7 @@ public static class DomainConstants
     public static readonly string[] LiveControlSessionStatuses = { "Active", "Completed", "Cancelled", "Failed", "Expired" };
     public static readonly string[] LiveControlStopReasons = { "UserReleased", "Timeout", "RainOverride", "ManualStop", "NewSessionStarted", "Cancelled" };
     public static readonly string[] LiveControlCommands = { "MOVE_FORWARD", "MOVE_BACKWARD", "ROTATE_LEFT", "ROTATE_RIGHT", "STOP" };
-    public static readonly string[] CommandExecutionKinds = { "Grid", "Continuous", "Mode", "Query" };
+    public static readonly string[] CommandExecutionKinds = { "Grid", "Continuous", "Mode", "Query" }; //Grid Eg: MOVE, Continous Eg: MOVE_FORWARD for 3000 ms, Mode Eg: STOP, AUTO, Set_Mode_Fast or setmodeslow for line tracker robot, Query Eg: REPORT
     public static readonly string[] CommandRollbackKinds = { "Exact", "BestEffort", "None" };
 
     // Human roles. Case-sensitive on purpose: the stored Role and the AdminOnly policy's
