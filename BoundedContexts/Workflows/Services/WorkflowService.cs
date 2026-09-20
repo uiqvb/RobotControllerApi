@@ -127,9 +127,38 @@ public class WorkflowService : IWorkflowService
         var existing = _dataAccess.GetWorkflowById(id);
         if (existing == null) return false;
         if (existing.Status is "Completed" or "Failed" or "RolledBack") throw new InvalidOperationException("Completed, failed, or rolled-back workflows cannot be cancelled.");
+
+        var now = DateTime.UtcNow;
         existing.Status = "Cancelled";
-        existing.ModifiedDate = DateTime.UtcNow;
-        return _dataAccess.UpdateWorkflow(existing.Id, existing);
+        existing.ModifiedDate = now;
+        var updated = _dataAccess.UpdateWorkflow(existing.Id, existing);
+        if (updated) CancelOutstandingJobsFor(existing.Id, now);
+        return updated;
+    }
+
+    // Cancelling a workflow has to cancel the steps it is made of. The dispatcher already
+    // refuses to hand out a job whose parent is terminal (PrepareQueuedJobForDispatch), but it
+    // only does so lazily, when the robot next calls claim-next - so until then the steps stay
+    // "Queued", the console still lists them as outstanding work, and an operator watching the
+    // screen cannot tell whether the cancel did anything. If the robot is offline, mid-cooldown,
+    // or being driven over WASD (which suppresses claim polls entirely), that state persists
+    // indefinitely.
+    //
+    // Doing it eagerly here makes cancel mean the same thing on screen as it does in the queue,
+    // and does not depend on the robot being reachable. The dispatcher's own check stays as a
+    // backstop for jobs created between the two.
+    private void CancelOutstandingJobsFor(int workflowId, DateTime now)
+    {
+        foreach (var job in _jobDataAccess.GetJobsByWorkflowId(workflowId))
+        {
+            // Leave finished steps alone. A completed step really did happen, and rewriting it
+            // to Cancelled would lose the history the rollback path reads back.
+            if (job.Status is "Completed" or "Failed" or "Cancelled" or "RolledBack") continue;
+
+            job.Status = "Cancelled";
+            job.ModifiedDate = now;
+            _jobDataAccess.UpdateJob(job.Id, job);
+        }
     }
 
     public bool MarkWorkflowStarted(int id, int? deviceCredentialId = null)

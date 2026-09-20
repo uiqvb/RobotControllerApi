@@ -336,6 +336,25 @@ public class WorkDispatchService : IWorkDispatchService
         workflow.Status = "RolledBack";
         workflow.ModifiedDate = now;
         _workflowDataAccess.UpdateWorkflow(workflow.Id, workflow);
+
+        // Cancel the steps that never ran. A rolled-back workflow is not going to be resumed —
+        // the robot has physically walked back out of the position those steps were planned
+        // from, so dispatching them later would drive it somewhere nobody asked for.
+        //
+        // This has to happen here rather than at dispatch time. GetOldestQueuedJobByDeviceId
+        // only returns jobs whose parent workflow is Queued/Claimed/Executing, so the moment
+        // the workflow becomes RolledBack its leftover steps are invisible to the dispatcher —
+        // which means PrepareQueuedJobForDispatch's terminal-status check is never reached for
+        // them. They would otherwise sit at "Queued" forever, cluttering the console and making
+        // it look as though cancelled work is still pending.
+        foreach (var job in jobs)
+        {
+            if (job.Status is "Completed" or "Failed" or "Cancelled" or "RolledBack") continue;
+
+            job.Status = "Cancelled";
+            job.ModifiedDate = now;
+            _jobDataAccess.UpdateJob(job.Id, job);
+        }
     }
 
     // The inverse handed to the robot alongside the command, for its local undo stack.
