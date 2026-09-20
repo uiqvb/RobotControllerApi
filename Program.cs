@@ -12,6 +12,7 @@ using RobotControllerApi.Infrastructure.DataAccess;
 using RobotControllerApi.Infrastructure.DataAccess.ADO;
 using RobotControllerApi.Infrastructure.DataAccess.EFCore;
 using RobotControllerApi.Infrastructure.DataAccess.Repository;
+using RobotControllerApi.Infrastructure.Logging;
 
 using RobotControllerApi.BoundedContexts.CommandCatalogues.Persistence;
 using RobotControllerApi.BoundedContexts.CommandCatalogues.Services;
@@ -105,6 +106,7 @@ builder.Services.AddSwaggerGen(options =>
 });
 
 builder.Services.AddHttpContextAccessor();
+builder.Services.AddSpectreRequestLogging(builder.Configuration);
 
 builder.Services
     .AddAuthentication(options =>
@@ -160,6 +162,10 @@ if (app.Environment.IsDevelopment())
 // fallback policy does not block anonymous access to the SPA.
 app.UseDefaultFiles();
 app.UseStaticFiles();
+
+// After static files so the dashboard's own assets stay out of the console, and
+// before authentication so rejected (401/403) calls are still reported.
+app.UseSpectreRequestLogging();
 app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
