@@ -3,11 +3,12 @@
 //
 // Seven stages: Build -> Test -> Code Quality -> Security -> Deploy -> Release -> Monitoring.
 //
-// Design principle the whole file is built around:
-//   ONE image is built in stage 1 and that exact image is tested, scanned, deployed to staging
-//   and released to production. Nothing is ever rebuilt mid-pipeline. Everything after Build
-//   consumes ${IMAGE_TAG}. That is what the rubric means by "smooth transitions between stages",
-//   and it is the difference between 91-95 and 96-100.
+// Artefact model:
+//   Stage 1 builds two images from the same Dockerfile - a deployable image from the
+//   "production" target and a separate image from the "test" target that carries the
+//   test project and tooling. The deployable image is built once and promoted unchanged
+//   through test, scan, staging and production; everything after stage 1 consumes
+//   ${IMAGE_TAG} rather than rebuilding.
 //
 // Host: Windows, Jenkins runs as a service, Docker Desktop with the WSL2 backend.
 // Compose is v2+ so it is "docker compose", never "docker-compose".
@@ -29,28 +30,51 @@ def dockerInspect(String target, String field) {
 }
 
 /**
- * Proves that the thing named is the exact image built in stage 1.
+ * Checks that `target` resolves to the image built in stage 1.
  *
- * The one-image principle is the design claim this whole pipeline rests on, and
- * until now it was only ever *asserted* - every stage referenced ${IMAGE_TAG}
- * and we trusted that nothing had re-tagged or rebuilt underneath us. This
- * turns the claim into an enforced invariant: the sha256 recorded at build time
- * is compared at five checkpoints, and a mismatch stops the pipeline rather
- * than shipping an artefact the tests never saw.
+ * Compares against the recorded image ID rather than the tag, because a tag is a
+ * mutable label that a later build could move. Called at three points: the test
+ * stack, staging and production.
  *
- * `field` is "Id" for an image and "Image" for a container - a container's
- * .Image is the digest of the image it was actually started from, which is what
- * makes the post-deploy checks meaningful rather than circular.
+ * `field` is "Id" for an image and "Image" for a container - a container's .Image
+ * is the ID of the image it was actually started from, so the post-deploy checks
+ * test the running container rather than re-reading the tag.
  */
 def verifyArtefact(String label, String target, String field) {
     def actual = dockerInspect(target, field)
-    if (actual != env.IMAGE_DIGEST) {
+    if (actual != env.IMAGE_ID) {
         error("""ARTEFACT MISMATCH at ${label}
-  expected (built in stage 1) : ${env.IMAGE_DIGEST}
+  expected (built in stage 1) : ${env.IMAGE_ID}
   actual   (${target}) : ${actual}
-The one-image principle has been violated. Refusing to continue.""")
+Refusing to continue: this is not the image the pipeline built and tested.""")
     }
-    echo "  [verified] ${label}: ${target} is running the stage-1 artefact"
+    echo "  [verified] ${label}: ${target} is running the stage-1 image"
+}
+
+/**
+ * Polls an environment's /health endpoint until it reports healthy, or gives up
+ * after 24 attempts at 5s intervals (~2 minutes).
+ *
+ * `portVar` is the name of an environment variable holding the port, so the same
+ * helper serves staging and production, on both the deploy and rollback paths.
+ * Returns true when healthy.
+ */
+def waitForHealthy(String portVar, String label) {
+    return powershell(returnStatus: true, script: """
+        \$url = "http://localhost:\$env:${portVar}/health"
+        for (\$i = 0; \$i -lt 24; \$i++) {
+            try {
+                \$r = Invoke-WebRequest -Uri \$url -UseBasicParsing -TimeoutSec 5
+                if (\$r.StatusCode -eq 200 -and \$r.Content -match '"status"\\s*:\\s*"healthy"') {
+                    Write-Host "${label} healthy after \$(\$i*5)s: \$(\$r.Content)"
+                    exit 0
+                }
+            } catch { }
+            Start-Sleep -Seconds 5
+        }
+        Write-Host "${label} did not report healthy within 120s"
+        exit 1
+    """) == 0
 }
 
 pipeline {
@@ -86,6 +110,12 @@ pipeline {
         SONAR_ORG       = 'uiqvb'
         SONAR_HOST      = 'https://sonarcloud.io'
 
+        // Pinned: on :latest a Trivy release can change severity classification or
+        // the fixed-version data, which moves the stage-4 gate between builds.
+        TRIVY_IMAGE     = 'aquasec/trivy:0.58.1'
+
+        // Floats within 8.0.x patch releases. Left unpinned deliberately - the
+        // scanner only needs a matching major.minor SDK to analyse the build.
         DOTNET_SDK      = 'mcr.microsoft.com/dotnet/sdk:8.0'
     }
 
@@ -93,12 +123,20 @@ pipeline {
 
         // =====================================================================
         // STAGE 1 - BUILD
-        // Produces the single deployable artefact: a tagged Docker image.
-        // Also builds the test-target image, which is a build product, not a rebuild.
+        // Builds the deployable image (production target) plus a test image
+        // (test target) used only by stage 2. Only the deployable image is
+        // archived and promoted.
         // =====================================================================
         stage('Build') {
             steps {
-                echo "Building ${IMAGE_NAME}:${IMAGE_TAG} from branch ${env.BRANCH_NAME ?: env.GIT_BRANCH}"
+                script {
+                    // BRANCH_NAME is set only by multibranch jobs; GIT_BRANCH comes from
+                    // the SCM checkout and is usually "origin/<name>". Neither is set on a
+                    // detached checkout with no ref, hence the fallback.
+                    def raw = env.BRANCH_NAME ?: env.GIT_BRANCH ?: ''
+                    env.SOURCE_BRANCH = raw ? raw.replaceFirst(/^origin\//, '') : 'unknown'
+                    echo "Building ${IMAGE_NAME}:${IMAGE_TAG} from branch ${env.SOURCE_BRANCH}"
+                }
 
                 bat """
                     if not exist "%DEPLOY_STATE%" mkdir "%DEPLOY_STATE%"
@@ -114,40 +152,40 @@ pipeline {
                         .
                 """
 
-                // Artifact storage: the image itself, not just a build log.
+                // Archive the image itself, not just the build log, so the exact
+                // artefact can be reloaded with `docker load` later.
                 bat """
                     docker save %IMAGE_NAME%:%IMAGE_TAG% -o "%WORKSPACE%\\%IMAGE_NAME%-%IMAGE_TAG%.tar"
-                    docker image inspect %IMAGE_NAME%:%IMAGE_TAG% --format "{{.Id}}" > "%WORKSPACE%\\image-digest.txt"
+                    docker image inspect %IMAGE_NAME%:%IMAGE_TAG% --format "{{.Id}}" > "%WORKSPACE%\\image-id.txt"
                 """
 
-                archiveArtifacts artifacts: "${IMAGE_NAME}-${IMAGE_TAG}.tar, image-digest.txt",
+                archiveArtifacts artifacts: "${IMAGE_NAME}-${IMAGE_TAG}.tar, image-id.txt",
                                  fingerprint: true,
                                  onlyIfSuccessful: true
 
                 bat 'docker image inspect %IMAGE_NAME%:%IMAGE_TAG% --format "Built {{.RepoTags}} / {{.Id}} / {{.Size}} bytes"'
 
-                // Record the artefact's identity once. Every later stage is checked
-                // against this value rather than against the tag, because a tag is a
-                // mutable label and a digest is not.
+                // Local image ID (the sha256 of the image config), not a registry digest -
+                // nothing is pushed to a registry. Later stages compare against this rather
+                // than the tag, which a subsequent build could move.
                 script {
-                    env.IMAGE_DIGEST = dockerInspect("${IMAGE_NAME}:${IMAGE_TAG}", 'Id')
-                    echo "Stage-1 artefact digest recorded: ${env.IMAGE_DIGEST}"
+                    env.IMAGE_ID = dockerInspect("${IMAGE_NAME}:${IMAGE_TAG}", 'Id')
+                    echo "Stage-1 image ID recorded: ${env.IMAGE_ID}"
                 }
             }
             post {
-                success { echo "Build OK - ${IMAGE_NAME}:${IMAGE_TAG} archived, digest ${env.IMAGE_DIGEST}" }
+                success { echo "Build OK - ${IMAGE_NAME}:${IMAGE_TAG} archived, image ID ${env.IMAGE_ID}" }
                 failure { echo 'Build FAILED - no artefact produced, pipeline stops here' }
             }
         }
 
         // =====================================================================
         // STAGE 2 - TEST
-        // Unit tests run inside the test image.
-        // Integration tests run against the PRODUCTION image from stage 1, on its
-        // own compose stack, so we are testing the artefact we will actually ship.
-        // Explicit pass/fail gating: a failed test aborts the pipeline, and a run
-        // that executes ZERO tests is treated as a failure (dotnet test exits 0
-        // when it finds nothing, which would otherwise give a false green).
+        // Unit tests run inside the test image. Integration tests run against the
+        // deployable image from stage 1, on its own compose stack.
+        // A failed test aborts the pipeline. A run that executes zero tests is also
+        // a failure: dotnet test exits 0 when it finds no tests, which would
+        // otherwise report a false pass.
         // =====================================================================
         stage('Test') {
             steps {
@@ -163,7 +201,7 @@ pipeline {
                             --results-directory /testresults
                 """
 
-                echo '--- Bringing up the test stack on the stage-1 image ---'
+                echo '--- Bringing up the test stack on the stage-1 deployable image ---'
                 bat """
                     set IMAGE_TAG=%IMAGE_TAG%
                     docker compose -f docker-compose.test.yml up -d
@@ -183,15 +221,15 @@ pipeline {
                     Write-Host "Test stack healthy after $($i * 5)s"
                 '''
 
-                // Checkpoint 1 of 5. Proves the integration tests below are exercising
-                // the production artefact and not some other build of it.
+                // Image check 1 of 3: confirms the integration tests below run against
+                // the deployable image rather than some other build of it.
                 script { verifyArtefact('test stack', 'robot-test-app', 'Image') }
 
-                echo '--- Integration tests (against the production image) ---'
-                // Network name and flags below are the exact combination verified working
-                // locally: the test image already defaults API_BASE_URL to the compose
-                // service name, and the test project is built in the image, so --no-build
-                // keeps this to a few seconds instead of recompiling.
+                echo '--- Integration tests (against the deployable image) ---'
+                // Joins the test stack's network so the test image can reach the app by
+                // compose service name, which is what API_BASE_URL defaults to. The test
+                // project is already compiled into the image, so --no-build skips a
+                // recompile.
                 bat """
                     docker run --rm ^
                         --network robot-test-net ^
@@ -202,7 +240,7 @@ pipeline {
                             --results-directory /testresults
                 """
 
-                // GUARD: refuse a green build that tested nothing.
+                // Fails the stage if no tests ran - see the zero-test note above.
                 powershell '''
                     $files = Get-ChildItem "$env:WORKSPACE\\testresults" -Filter *.xml -ErrorAction SilentlyContinue
                     if (-not $files) { Write-Error "No test result files produced"; exit 1 }
@@ -216,7 +254,7 @@ pipeline {
                     }
                     Write-Host "TOTAL TESTS EXECUTED: $total"
                     if ($total -eq 0) {
-                        Write-Error "Zero tests executed. dotnet test exits 0 when it finds nothing - failing deliberately rather than reporting a false pass."
+                        Write-Error "Zero tests executed. dotnet test exits 0 when it finds no tests, so this is failed explicitly."
                         exit 1
                     }
                     # Recorded for the build manifest written in stage 7.
@@ -235,20 +273,19 @@ pipeline {
 
         // =====================================================================
         // STAGE 3 - CODE QUALITY
-        // Code health for developers: duplication, smells, complexity, maintainability.
-        // NOT security scanning - that is stage 4, deliberately kept separate.
-        // Uses dotnet-sonarscanner (the MSBuild scanner). The CLI scanner used in
-        // 7.1C produces near-useless results on .NET because it cannot see the
-        // compilation, so the analysis runs inside a .NET SDK container.
-        // Quality gate aborts the pipeline.
+        // Maintainability analysis: duplication, code smells, complexity. Separate
+        // from the vulnerability scanning in stage 4.
+        // Uses dotnet-sonarscanner (the MSBuild scanner) rather than the CLI scanner
+        // used in 7.1C, which cannot see the .NET compilation and reports very little.
+        // It needs the SDK, so the analysis runs inside a .NET SDK container.
+        // A failing quality gate fails the stage.
         // =====================================================================
         stage('Code Quality') {
             steps {
-                // The scan runs from a script file rather than an inline `bash -c`.
-                // Nested quoting across Groovy -> cmd -> bash is where this stage broke
-                // first time: $PATH was interpolated by Groovy and the Windows PATH was
-                // injected into the container, wiping dotnet off the PATH.
-                // A file has exactly one layer of quoting and no escaping at all.
+                // Written to a file rather than passed as an inline `bash -c`: with three
+                // layers of quoting (Groovy -> cmd -> bash), Groovy interpolates $PATH and
+                // the Windows PATH ends up inside the container, hiding dotnet. A script
+                // file has one layer of quoting and needs no escaping.
                 writeFile file: 'sonar-scan.sh', text: '''#!/bin/bash
 set -euo pipefail
 
@@ -276,6 +313,7 @@ rm -f /build/*.tar
 ls -la /build | head -30
 
 echo "--- installing dotnet-sonarscanner ---"
+# Unpinned: installs the current release each run. Add --version <x.y.z> here to pin.
 dotnet tool install --global dotnet-sonarscanner
 export PATH="$PATH:/root/.dotnet/tools"
 
@@ -291,12 +329,14 @@ dotnet sonarscanner begin \\
 echo "--- build under analysis ---"
 dotnet build --no-incremental
 
-echo "--- sonarscanner end (this is where the quality gate blocks) ---"
+# sonar.qualitygate.wait=true was set at begin, so this call blocks until
+# SonarCloud returns the gate result and exits non-zero if it failed.
+echo "--- sonarscanner end ---"
 dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
 '''
-                // Single-quoted Groovy string: no interpolation, so the token is never
-                // baked into the command line. cmd expands the %VARS%, and the secret
-                // reaches the container only through -e.
+                // Single-quoted Groovy string: no interpolation, so the token is not baked
+                // into the command line. cmd expands the %VARS%, and the secret reaches
+                // the container only as an inherited environment variable via -e.
                 withCredentials([string(credentialsId: 'SONAR_TOKEN', variable: 'SONAR_TOKEN')]) {
                     bat '''
                         docker run --rm ^
@@ -325,21 +365,24 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
 
         // =====================================================================
         // STAGE 4 - SECURITY
-        // Protecting the app and its users from attackers. Distinct from stage 3.
-        // Trivy scans the built image: OS packages, NuGet dependencies, and secrets.
-        // Build fails on CRITICAL. Every finding is recorded with what it is, its
-        // severity, and whether/how it was addressed - all three are mandated by the brief.
+        // Trivy scans the built image: OS packages, NuGet dependencies and secrets.
+        // Separate concern from stage 3's maintainability analysis.
+        //
+        // Gate: fails the stage on CRITICAL vulnerabilities that have a fix available
+        // (--ignore-unfixed). Unfixable CRITICALs are reported and archived but do not
+        // fail the build - their disposition is recorded in security-findings.md.
         // =====================================================================
         stage('Security') {
             steps {
                 bat 'if not exist "%WORKSPACE%\\security" mkdir "%WORKSPACE%\\security"'
 
-                // Full report first (never fails) so there is always evidence to write up.
+                // Report-only pass: `|| exit /b 0` keeps the scan output available even
+                // when the gate below fails the stage.
                 bat """
                     docker run --rm ^
                         -v //var/run/docker.sock:/var/run/docker.sock ^
                         -v "%WORKSPACE%\\security:/out" ^
-                        aquasec/trivy:latest image ^
+                        %TRIVY_IMAGE% image ^
                         --scanners vuln,secret ^
                         --severity LOW,MEDIUM,HIGH,CRITICAL ^
                         --format table ^
@@ -351,7 +394,7 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                     docker run --rm ^
                         -v //var/run/docker.sock:/var/run/docker.sock ^
                         -v "%WORKSPACE%\\security:/out" ^
-                        aquasec/trivy:latest image ^
+                        %TRIVY_IMAGE% image ^
                         --scanners vuln,secret ^
                         --format json ^
                         --output /out/trivy-report.json ^
@@ -360,28 +403,25 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
 
                 bat 'type "%WORKSPACE%\\security\\trivy-full-report.txt"'
 
-                // Image scanning finds vulnerable packages. It does not find a
-                // container that runs as root, a missing USER directive, or a compose
-                // service with a writable root filesystem - those are configuration
-                // faults, and they are the ones an attacker reaches first. Report-only
-                // on purpose: this is a new signal and gating on it before knowing its
-                // baseline would block builds for reasons nobody has triaged yet.
+                // Config scan: catches Dockerfile/compose misconfiguration (running as
+                // root, missing USER, writable root filesystem) that an image scan does
+                // not look for. Report-only - no baseline has been triaged yet, so
+                // gating on it would fail builds on untriaged findings.
                 bat """
                     docker run --rm ^
                         -v "%WORKSPACE%:/project" ^
                         -v "%WORKSPACE%\\security:/out" ^
-                        aquasec/trivy:latest config /project ^
+                        %TRIVY_IMAGE% config /project ^
                         --severity HIGH,CRITICAL ^
                         --format table ^
                         --output /out/trivy-config-report.txt || exit /b 0
                 """
                 bat 'type "%WORKSPACE%\\security\\trivy-config-report.txt" 2>nul || echo (no misconfiguration findings)'
 
-                // Turn 300+ raw findings into the three numbers that actually decide
-                // anything, so the console log is self-explanatory rather than a wall
-                // of CVEs. The distinction that matters is fixable vs unfixable: an
-                // unfixable finding is a risk to accept and document, a fixable one is
-                // work to do, and only the latter is worth failing a build over.
+                // Summarises the JSON report by severity, splitting fixable from
+                // unfixable. Only fixable CRITICALs are actionable, and those are what
+                // the gate below blocks on. Also writes trivy-summary.json, which stage 7
+                // splices into the build manifest.
                 powershell '''
                     $path = "$env:WORKSPACE\\security\\trivy-report.json"
                     $j = Get-Content $path -Raw | ConvertFrom-Json
@@ -438,11 +478,12 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                     $summary | ConvertTo-Json | Set-Content "$env:WORKSPACE\\security\\trivy-summary.json" -Encoding ascii
                 '''
 
-                // Gate: CRITICAL fails the build.
+                // Gate: exits 1 on CRITICAL vulnerabilities that have a fix available.
+                // --ignore-unfixed means unfixable CRITICALs do not fail the stage.
                 bat """
                     docker run --rm ^
                         -v //var/run/docker.sock:/var/run/docker.sock ^
-                        aquasec/trivy:latest image ^
+                        %TRIVY_IMAGE% image ^
                         --scanners vuln ^
                         --severity CRITICAL ^
                         --exit-code 1 ^
@@ -454,20 +495,23 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                                  allowEmptyArchive: true
             }
             post {
-                always  { echo 'Scan evidence archived for this build, pass or fail. See security-findings.md for the disposition of every finding.' }
+                always  { echo 'Scan reports archived. Dispositions are recorded in security-findings.md.' }
                 success { echo 'Security gate PASSED - no CRITICAL vulnerability with an available fix' }
                 failure {
-                    echo 'CRITICAL vulnerability found. Fix it, or justify and document the mitigation in security-findings.md, then re-run.'
+                    echo 'CRITICAL vulnerability with an available fix. Update the dependency, or document the mitigation in security-findings.md, then re-run.'
                 }
             }
         }
 
         // =====================================================================
         // STAGE 5 - DEPLOY (staging)
-        // Infrastructure as code: the compose file is committed and is the only
-        // description of the environment. Config comes from a Jenkins credential,
-        // never from the repo. Health-checked after deploy, with automatic
-        // rollback to the previous known-good tag if the health check fails.
+        // The committed compose file is the only description of the environment.
+        // Environment-specific config comes from the ENV_STAGING Jenkins credential,
+        // never from the repo.
+        //
+        // On a failed health check the stage redeploys the previous known-good tag
+        // and verifies it before failing. Rollback depends on that tag's image still
+        // being present locally - see the note on image pruning in the final post block.
         // =====================================================================
         stage('Deploy to Staging') {
             steps {
@@ -489,56 +533,31 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                 """
 
                 script {
-                    def healthy = powershell(returnStatus: true, script: '''
-                        $url = "http://localhost:$env:STAGING_PORT/health"
-                        for ($i = 0; $i -lt 24; $i++) {
-                            try {
-                                $r = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5
-                                if ($r.StatusCode -eq 200 -and $r.Content -match '"status"\\s*:\\s*"healthy"') {
-                                    Write-Host "Staging healthy after $($i*5)s: $($r.Content)"
-                                    exit 0
-                                }
-                            } catch { }
-                            Start-Sleep -Seconds 5
-                        }
-                        Write-Host "Staging FAILED health check"
-                        exit 1
-                    ''') == 0
-
-                    if (!healthy) {
+                    if (!waitForHealthy('STAGING_PORT', 'Staging')) {
                         echo '*** STAGING HEALTH CHECK FAILED - ROLLING BACK ***'
                         def stateFile = "${DEPLOY_STATE}\\staging-last-good.txt"
                         def prev = fileExists(stateFile) ? readFile(file: stateFile).trim() : ''
                         if (!prev) {
-                            error 'Health check failed and there is no previous good tag to roll back to.'
+                            error "Deployment of ${IMAGE_TAG} failed its health check and no previous known-good tag is recorded. Staging is left running the failed deployment."
                         }
                         bat """
                             set IMAGE_TAG=${prev}
                             docker compose --env-file .env.staging -f docker-compose.staging.yml up -d --force-recreate
                         """
-                        powershell '''
-                            $url = "http://localhost:$env:STAGING_PORT/health"
-                            for ($i = 0; $i -lt 24; $i++) {
-                                try {
-                                    $r = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5
-                                    if ($r.StatusCode -eq 200) { Write-Host "Rollback verified healthy"; exit 0 }
-                                } catch { }
-                                Start-Sleep -Seconds 5
-                            }
-                            Write-Error "Rollback did not come up healthy either"
-                            exit 1
-                        '''
-                        error "Deployment of ${IMAGE_TAG} failed health check. Rolled back to ${prev} and verified. Pipeline stopped."
+                        if (!waitForHealthy('STAGING_PORT', 'Staging rollback')) {
+                            error "Deployment of ${IMAGE_TAG} failed its health check AND the rollback to ${prev} did not become healthy. Staging needs manual recovery."
+                        }
+                        error "Deployment of ${IMAGE_TAG} failed its health check. Rolled back to ${prev} and verified healthy."
                     }
 
-                    // Checkpoint 2 of 5.
+                    // Image check 2 of 3.
                     verifyArtefact('staging', 'robot-staging-app', 'Image')
 
-                    // A health check proves something is listening and can reach its
-                    // database. It does not prove the right application is behind the
-                    // port, or that authentication survived deployment. These three
-                    // assertions are deliberately read-only and need no credentials,
-                    // so they are safe to run against a live environment every build.
+                    // A health check confirms the app is listening and can reach its
+                    // database. It does not confirm which application is behind the port
+                    // or that authentication survived the deployment. These assertions are
+                    // read-only and need no credentials, so they are safe to run against a
+                    // live environment on every build.
                     powershell '''
                         $base = "http://localhost:$env:STAGING_PORT"
                         $failures = @()
@@ -553,8 +572,8 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                             else { Write-Host "  [pass] /health -> 200, database connected" }
                         } catch { $failures += "health request threw: $($_.Exception.Message)" }
 
-                        # 2. Authorisation still fails closed. A deployment that silently
-                        #    dropped authentication would pass a health check happily.
+                        # 2. Authorisation fails closed. A deployment that dropped
+                        #    authentication would still pass the health check.
                         try {
                             Invoke-WebRequest "$base/api/maps" -UseBasicParsing -TimeoutSec 10 | Out-Null
                             $failures += "GET /api/maps without credentials returned 200 - authentication is NOT enforced"
@@ -564,14 +583,11 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                             else               { $failures += "unauthenticated /api/maps returned $code, expected 401" }
                         }
 
-                        # 3. The container's own HEALTHCHECK agrees. This is a different
-                        #    signal from the HTTP poll above: it is Docker probing from
-                        #    inside, and compose dependency ordering relies on it.
-                        #    The container was recreated seconds ago and the image's
-                        #    HEALTHCHECK has --start-period=20s --interval=15s, so
-                        #    "starting" here means the first probe has not run yet, not
-                        #    that anything is wrong. Wait for a verdict instead of
-                        #    sampling before there is one.
+                        # 3. The container's own HEALTHCHECK, which is Docker probing from
+                        #    inside and is what compose dependency ordering uses.
+                        #    The image sets --start-period=20s --interval=15s, so a
+                        #    freshly recreated container reports "starting" until the
+                        #    first probe runs. Poll until it reaches a verdict.
                         $state = "starting"
                         for ($i = 0; $i -lt 24; $i++) {
                             $state = ((docker inspect --format "{{.State.Health.Status}}" robot-staging-app) | Select-Object -Last 1).Trim()
@@ -603,9 +619,12 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
 
         // =====================================================================
         // STAGE 6 - RELEASE (production)
-        // Promotes the SAME image that staging just proved healthy. A genuinely
-        // separate environment: own database, own volume, own network, own port,
-        // own config. Tagged and versioned in git, fully automated.
+        // Promotes the image staging just verified - no rebuild. Production is a
+        // separate environment: own database, volume, network, port and config,
+        // supplied by the ENV_PROD credential. Releases are tagged in git.
+        //
+        // Same rollback contract as staging: redeploy the previous known-good tag
+        // and verify it before failing.
         // =====================================================================
         stage('Release to Production') {
             steps {
@@ -619,42 +638,30 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                 """
 
                 script {
-                    def healthy = powershell(returnStatus: true, script: '''
-                        $url = "http://localhost:$env:PROD_PORT/health"
-                        for ($i = 0; $i -lt 24; $i++) {
-                            try {
-                                $r = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5
-                                if ($r.StatusCode -eq 200 -and $r.Content -match '"status"\\s*:\\s*"healthy"') {
-                                    Write-Host "Production healthy: $($r.Content)"
-                                    exit 0
-                                }
-                            } catch { }
-                            Start-Sleep -Seconds 5
-                        }
-                        exit 1
-                    ''') == 0
-
-                    if (!healthy) {
+                    if (!waitForHealthy('PROD_PORT', 'Production')) {
                         echo '*** PRODUCTION HEALTH CHECK FAILED - ROLLING BACK ***'
                         def stateFile = "${DEPLOY_STATE}\\prod-last-good.txt"
                         def prev = fileExists(stateFile) ? readFile(file: stateFile).trim() : ''
-                        if (!prev) { error 'Production health check failed with no previous good tag.' }
+                        if (!prev) {
+                            error "Release of ${IMAGE_TAG} failed its health check and no previous known-good tag is recorded. Production is left running the failed release."
+                        }
                         bat """
                             set IMAGE_TAG=${prev}
                             docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --force-recreate
                         """
-                        error "Release of ${IMAGE_TAG} failed health check. Rolled back to ${prev}."
+                        if (!waitForHealthy('PROD_PORT', 'Production rollback')) {
+                            error "Release of ${IMAGE_TAG} failed its health check AND the rollback to ${prev} did not become healthy. Production needs manual recovery."
+                        }
+                        error "Release of ${IMAGE_TAG} failed its health check. Rolled back to ${prev} and verified healthy."
                     }
 
-                    // Checkpoint 3 of 5. The claim this pipeline is built on - that
-                    // production runs the artefact the tests passed against - is
-                    // proven here by digest, not asserted in a comment.
+                    // Image check 3 of 3: confirms production is running the image built
+                    // in stage 1 and tested in stage 2.
                     verifyArtefact('production', 'robot-prod-app', 'Image')
 
-                    // Same three read-only assertions as staging. Running them again
-                    // against production is the point: staging passing tells you the
-                    // image is good, it does not tell you production's own config,
-                    // database and network came up correctly.
+                    // The same read-only assertions as staging, repeated here because
+                    // staging passing only shows the image is good - it says nothing about
+                    // production's own config, database and network.
                     powershell '''
                         $base = "http://localhost:$env:PROD_PORT"
                         $failures = @()
@@ -696,11 +703,9 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                         Write-Host "Smoke test passed: 3/3"
                     '''
 
-                    // Environment isolation, verified rather than claimed. Staging and
-                    // production must be talking to different databases; if a config
-                    // mistake pointed them at the same one, every health check above
-                    // would still pass and the fault would only surface as corrupted
-                    // data later.
+                    // Environment isolation check. If a config error pointed staging and
+                    // production at the same database or volume, every check above would
+                    // still pass and the fault would only surface later as corrupted data.
                     powershell '''
                         $s = (docker inspect --format "{{.Id}}" robot-staging-db) | Select-Object -Last 1
                         $p = (docker inspect --format "{{.Id}}" robot-prod-db)    | Select-Object -Last 1
@@ -722,11 +727,13 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                     writeFile file: "${DEPLOY_STATE}\\prod-last-good.txt", text: "${IMAGE_TAG}"
                 }
 
-                // Version the release in git.
+                // Tag the released commit. @echo off keeps the token out of the console:
+                // Jenkins masks credentials, but the push URL is not echoed at all this way.
                 withCredentials([usernamePassword(credentialsId: 'GITHUB_CREDS',
                                                   usernameVariable: 'GIT_USER',
                                                   passwordVariable: 'GIT_TOKEN')]) {
                     bat """
+                        @echo off
                         git config user.email "manitkhera26@gmail.com"
                         git config user.name "Jenkins"
                         git tag -a v%IMAGE_TAG% -m "Automated release v%IMAGE_TAG% from build #%BUILD_NUMBER%"
@@ -744,12 +751,10 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
 
         // =====================================================================
         // STAGE 7 - MONITORING & ALERTING
-        // Prometheus scrapes cAdvisor (container health) and blackbox_exporter
-        // (probes production's /health, giving uptime and latency). Grafana
-        // renders it. Alertmanager fires on container-down, health-probe-failing
-        // and high-latency rules.
-        // Incident simulation is performed on camera: kill the production
-        // container, watch the alert fire, bring it back.
+        // Prometheus scrapes cAdvisor (container metrics) and blackbox_exporter
+        // (probes production's /health for uptime and latency). Grafana renders it.
+        // Alertmanager fires on container-down, health-probe-failing and
+        // high-latency rules.
         // =====================================================================
         stage('Monitoring') {
             steps {
@@ -776,13 +781,12 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                     if (-not $ok) { Write-Error "Prometheus targets never came up"; exit 1 }
                 '''
 
-                // Compose does not recreate a container when only the *contents* of a
-                // bind-mounted config file change - it compares the mount spec, not the
-                // file. So an edit to prometheus.yml, alert-rules.yml or alertmanager.yml
-                // is committed, deployed, and then silently ignored by the process that
-                // is already running, potentially for days. Both services expose a reload
-                // endpoint; calling it every run makes the committed config the running
-                // config, which is the whole point of keeping it in the repo.
+                // Compose compares mount specs, not file contents, so it will not recreate
+                // a container when only a bind-mounted config file changed. Without this,
+                // an edit to prometheus.yml, alert-rules.yml or alertmanager.yml is
+                // committed and deployed but ignored by the running process. Both services
+                // expose a reload endpoint; failing here rather than continuing prevents
+                // the stage passing on a stale config.
                 powershell '''
                     $targets = @(
                         @{ name = "prometheus";   url = "http://localhost:9090/-/reload" },
@@ -810,9 +814,9 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                     }
                 '''
 
-                // An alert that fires but is never delivered is not monitoring. Confirm
-                // the receiving end of the notification path is actually up, so the
-                // stage cannot report success on a half-wired alerting chain.
+                // Confirms the notification receiver is up. Prometheus evaluating a rule
+                // and Alertmanager delivering the notification are separate steps, and a
+                // rules check alone would pass with the delivery end down.
                 powershell '''
                     $ok = $false
                     for ($i = 0; $i -lt 12; $i++) {
@@ -826,14 +830,13 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                     Write-Host "Notification receiver ready. Deliveries are visible with: docker logs robot-alert-logger"
                 '''
 
-                // Traceability manifest. Ties one build number to the exact commit, the
-                // exact image digest, the tests that ran against it and the security
-                // posture it was released with. Without this the evidence for a release
-                // is scattered across Jenkins, SonarCloud, GitHub and a scan report.
+                // Traceability manifest: ties the build number to the commit, image ID,
+                // test count and security posture it was released with, which otherwise
+                // live in four separate systems.
                 script {
-                    // Assembled as plain text rather than with writeJSON/readJSON, which
-                    // need the Pipeline Utility Steps plugin. The security block is the
-                    // summary file spliced in verbatim - it is already valid JSON.
+                    // Assembled as text rather than with writeJSON/readJSON, which need the
+                    // Pipeline Utility Steps plugin. trivy-summary.json is spliced in
+                    // verbatim - it is already valid JSON.
                     def testCount = fileExists('testresults/test-count.txt')
                         ? readFile('testresults/test-count.txt').trim() : 'unknown'
                     def security = fileExists('security/trivy-summary.json')
@@ -847,15 +850,14 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
     },
     "source": {
         "repository": "https://github.com/uiqvb/RobotControllerApi",
-        "branch": "deploying",
+        "branch": "${env.SOURCE_BRANCH ?: 'unknown'}",
         "commit": "${env.GIT_COMMIT ?: 'unknown'}"
     },
     "artefact": {
         "image": "${IMAGE_NAME}:${IMAGE_TAG}",
-        "digest": "${env.IMAGE_DIGEST}",
+        "imageId": "${env.IMAGE_ID}",
         "releaseTag": "v${IMAGE_TAG}",
-        "builtOnce": true,
-        "digestVerifiedAt": ["test stack", "staging", "production"]
+        "imageIdVerifiedAt": ["test stack", "staging", "production"]
     },
     "verification": {
         "testsExecuted": "${testCount}",
@@ -893,14 +895,23 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
              Production:      http://localhost:${PROD_PORT}/health
              Grafana:         http://localhost:3000
              Git tag:         v${IMAGE_TAG}
-             One image built in stage 1, carried through all seven stages.
+             Deployable image built in stage 1 and promoted unchanged to production.
             ================================================================
             """
         }
         failure {
-            echo "PIPELINE FAILED at build #${BUILD_NUMBER}. Nothing was promoted. See the stage log above for the reason."
+            // The pipeline does not track how far promotion got, so this does not
+            // claim anything about staging or production state - a failure in stage 7
+            // leaves a live release in place.
+            echo "PIPELINE FAILED at build #${BUILD_NUMBER}. Check the failing stage above for the reason and the current state of each environment."
         }
         always {
+            // Dangling images only - `prune` without -a does not remove tagged images,
+            // so the previous known-good release tags used for rollback survive.
+            // Consequence: myapp:* tags accumulate and are never reclaimed here, and a
+            // manual `docker image prune -a` or `docker system prune -a` would delete the
+            // rollback target recorded in DEPLOY_STATE. There is no registry to pull it
+            // back from, so rollback is best-effort rather than guaranteed.
             bat 'docker image prune -f --filter "until=168h" || exit /b 0'
         }
     }
