@@ -147,9 +147,8 @@ pipeline {
         // Where we remember the last known-good tag per environment, for rollback.
         DEPLOY_STATE    = 'C:\\ProgramData\\jenkins-deploy-state'
 
-        // TODO: replace with the version verified working in this environment.
-        // Check with: dotnet tool list --global   (after a successful build)
-        SONAR_SCANNER_VERSION = '<SET_TO_CURRENT_WORKING_VERSION>'
+        // Version installed and verified working in builds 6, 7 and 9.
+        SONAR_SCANNER_VERSION = '11.3.0'
 
         SONAR_PROJECT   = 'uiqvb_RobotControllerApi'
         SONAR_ORG       = 'uiqvb'
@@ -186,8 +185,8 @@ pipeline {
                 bat """
                     if not exist "%DEPLOY_STATE%" mkdir "%DEPLOY_STATE%"
 
-                    REM :latest is the fallback in docker-compose.*.yml
-                    REM (image: myapp:${IMAGE_TAG:-latest}) for bringing a stack up by hand.
+                    REM :latest is kept because the compose files fall back to it when
+                    REM IMAGE_TAG is unset, which is how a stack is brought up by hand.
                     docker build --target production ^
                         -t %IMAGE_NAME%:%IMAGE_TAG% ^
                         -t %IMAGE_NAME%:latest ^
