@@ -414,7 +414,8 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
         // Separate concern from stage 3's maintainability analysis.
         //
         // Gate: fails the stage on CRITICAL vulnerabilities that have a fix available
-        // (--ignore-unfixed). Unfixable CRITICALs are reported and archived but do not
+        // (--ignore-unfixed). These must be remediated to pass; documentation does not
+        // override the gate. Unfixable CRITICALs are reported and archived but do not
         // fail the build - their disposition is recorded in security-findings.md.
         // =====================================================================
         stage('Security') {
@@ -545,7 +546,7 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                 always  { echo 'Scan reports archived. Dispositions are recorded in security-findings.md.' }
                 success { echo 'Security gate PASSED - no CRITICAL vulnerability with an available fix' }
                 failure {
-                    echo 'CRITICAL vulnerability with an available fix. Update the dependency, or document the mitigation in security-findings.md, then re-run.'
+                    echo 'CRITICAL vulnerability with an available fix detected. Remediate the vulnerable dependency or image component before re-running - documenting it does not satisfy this gate. Record relevant analysis in security-findings.md if needed.'
                 }
             }
         }
@@ -556,9 +557,11 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
         // Environment-specific config comes from the ENV_STAGING Jenkins credential,
         // never from the repo.
         //
-        // On a failed health check the stage redeploys the previous known-good tag
-        // and verifies it before failing. Rollback depends on that tag's image still
-        // being present locally - see the note on image pruning in the final post block.
+        // Deployment verification is health check, image identity and smoke tests. If
+        // any of them fails, the previous known-good release is redeployed and checked
+        // before the stage fails; with no previous release the failed candidate app is
+        // stopped instead. Rollback depends on that tag's image still being present
+        // locally - see the note on image pruning in the final post block.
         // =====================================================================
         stage('Deploy to Staging') {
             steps {
@@ -674,8 +677,9 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
         // separate environment: own database, volume, network, port and config,
         // supplied by the ENV_PROD credential. Releases are tagged in git.
         //
-        // Same rollback contract as staging: redeploy the previous known-good tag
-        // and verify it before failing.
+        // Deployment verification is health check, image identity, smoke tests and
+        // environment isolation. Same failure contract as staging, against production's
+        // own known-good tag.
         // =====================================================================
         stage('Release to Production') {
             steps {
@@ -917,11 +921,12 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                     Write-Host "Notification receiver ready. Deliveries are visible with: docker logs robot-alert-logger"
                 '''
 
-                // End-to-end notification check. Posts a clearly-named CI alert straight
-                // to Alertmanager and confirms the receiver logged it, proving routing and
-                // delivery without stopping a real service. Resolved immediately afterwards
-                // so nothing is left firing. Does not exercise Prometheus rule evaluation -
-                // that path is demonstrated separately by stopping the production container.
+                // Alertmanager-to-receiver delivery check. Posts a clearly-named CI alert
+                // straight to Alertmanager and confirms the receiver logged it, then
+                // resolves it so nothing is left firing.
+                // Scope: Jenkins -> Alertmanager -> receiver. Prometheus condition and
+                // rule evaluation are NOT exercised here; that path is demonstrated
+                // manually by stopping the production container.
                 powershell '''
                     $amUrl = "http://localhost:9093/api/v2/alerts"
                     $now   = (Get-Date).ToUniversalTime()
@@ -942,7 +947,7 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                     }
 
                     Send-CIAlert $now.AddMinutes(3)
-                    Write-Host "Synthetic alert posted to Alertmanager, waiting for delivery..."
+                    Write-Host "Synthetic alert posted to Alertmanager (routing test), waiting for delivery..."
 
                     $delivered = $false
                     for ($i = 0; $i -lt 18; $i++) {
@@ -958,7 +963,7 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                         Write-Error "Synthetic alert was accepted by Alertmanager but never reached the receiver - the notification path is broken"
                         exit 1
                     }
-                    Write-Host "  [pass] synthetic alert delivered end to end after $($i*5)s, then resolved"
+                    Write-Host "  [pass] Alertmanager routed the synthetic alert to the receiver after $($i*5)s, then resolved"
                 '''
 
                 // Traceability manifest: ties the build number to the commit, image ID,
@@ -1010,7 +1015,7 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
             }
             post {
                 always  { echo 'Monitoring stage complete' }
-                success { echo 'Monitoring live, targets healthy, alert rules loaded, notification path verified' }
+                success { echo 'Monitoring live, required targets healthy, alert rules loaded, Alertmanager-to-receiver delivery verified' }
                 failure { echo 'Monitoring FAILED - the release is live but unobserved. Treat as an incident.' }
             }
         }
