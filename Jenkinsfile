@@ -77,6 +77,47 @@ def waitForHealthy(String portVar, String label) {
     """) == 0
 }
 
+/**
+ * Handles a failed deployment validation. Always throws.
+ *
+ * With a previous known-good tag: redeploys it and verifies it becomes healthy.
+ * Without one: stops the failed app container rather than leaving it serving.
+ * Only the app service is touched - databases, volumes and networks are left alone.
+ *
+ * `cfg` keys: label, composeFile, envFile, portVar, stateFile, appService.
+ */
+def failDeployment(Map cfg, String reason) {
+    def prev = fileExists(cfg.stateFile) ? readFile(file: cfg.stateFile).trim() : ''
+
+    if (!prev) {
+        bat """
+            set IMAGE_TAG=${env.IMAGE_TAG}
+            docker compose --env-file ${cfg.envFile} -f ${cfg.composeFile} stop ${cfg.appService}
+        """
+        error("""${cfg.label} deployment of ${env.IMAGE_TAG} failed verification.
+  reason          : ${reason}
+  rollback target : none recorded - this is the first deployment
+  action taken    : failed ${cfg.label.toLowerCase()} app container stopped; database and volumes untouched
+Manual investigation required.""")
+    }
+
+    echo "*** ${cfg.label.toUpperCase()} VERIFICATION FAILED - ROLLING BACK TO ${prev} ***"
+    bat """
+        set IMAGE_TAG=${prev}
+        docker compose --env-file ${cfg.envFile} -f ${cfg.composeFile} up -d --force-recreate ${cfg.appService}
+    """
+
+    if (!waitForHealthy(cfg.portVar, "${cfg.label} rollback")) {
+        error("""${cfg.label} deployment of ${env.IMAGE_TAG} failed verification AND the rollback to ${prev} did not become healthy.
+  reason : ${reason}
+Manual recovery required.""")
+    }
+
+    error("""${cfg.label} deployment of ${env.IMAGE_TAG} failed verification.
+  reason         : ${reason}
+  rolled back to : ${prev}, verified healthy""")
+}
+
 pipeline {
     agent any
 
@@ -105,6 +146,10 @@ pipeline {
 
         // Where we remember the last known-good tag per environment, for rollback.
         DEPLOY_STATE    = 'C:\\ProgramData\\jenkins-deploy-state'
+
+        // TODO: replace with the version verified working in this environment.
+        // Check with: dotnet tool list --global   (after a successful build)
+        SONAR_SCANNER_VERSION = '<SET_TO_CURRENT_WORKING_VERSION>'
 
         SONAR_PROJECT   = 'uiqvb_RobotControllerApi'
         SONAR_ORG       = 'uiqvb'
@@ -141,10 +186,11 @@ pipeline {
                 bat """
                     if not exist "%DEPLOY_STATE%" mkdir "%DEPLOY_STATE%"
 
+                    REM :latest is the fallback in docker-compose.*.yml
+                    REM (image: myapp:${IMAGE_TAG:-latest}) for bringing a stack up by hand.
                     docker build --target production ^
                         -t %IMAGE_NAME%:%IMAGE_TAG% ^
                         -t %IMAGE_NAME%:latest ^
-                        -t %IMAGE_NAME%:%IMAGE_TAG%-rc ^
                         .
 
                     docker build --target test ^
@@ -313,8 +359,7 @@ rm -f /build/*.tar
 ls -la /build | head -30
 
 echo "--- installing dotnet-sonarscanner ---"
-# Unpinned: installs the current release each run. Add --version <x.y.z> here to pin.
-dotnet tool install --global dotnet-sonarscanner
+dotnet tool install --global dotnet-sonarscanner --version "$SONAR_SCANNER_VERSION"
 export PATH="$PATH:/root/.dotnet/tools"
 
 echo "--- sonarscanner begin ---"
@@ -346,6 +391,7 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                             -e SONAR_PROJECT=%SONAR_PROJECT% ^
                             -e SONAR_ORG=%SONAR_ORG% ^
                             -e SONAR_HOST=%SONAR_HOST% ^
+                            -e SONAR_SCANNER_VERSION=%SONAR_SCANNER_VERSION% ^
                             %DOTNET_SDK% ^
                             bash /src/sonar-scan.sh
                     '''
@@ -491,7 +537,9 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                         %IMAGE_NAME%:%IMAGE_TAG%
                 """
 
-                archiveArtifacts artifacts: 'security/trivy-full-report.txt, security/trivy-report.json, security/trivy-summary.json, security/trivy-config-report.txt',
+                // security-findings.md is documentation, not a pipeline input. Archived
+                // alongside the scan output when present; its absence is not a failure.
+                archiveArtifacts artifacts: 'security/trivy-full-report.txt, security/trivy-report.json, security/trivy-summary.json, security/trivy-config-report.txt, security-findings.md',
                                  allowEmptyArchive: true
             }
             post {
@@ -533,32 +581,29 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                 """
 
                 script {
-                    if (!waitForHealthy('STAGING_PORT', 'Staging')) {
-                        echo '*** STAGING HEALTH CHECK FAILED - ROLLING BACK ***'
-                        def stateFile = "${DEPLOY_STATE}\\staging-last-good.txt"
-                        def prev = fileExists(stateFile) ? readFile(file: stateFile).trim() : ''
-                        if (!prev) {
-                            error "Deployment of ${IMAGE_TAG} failed its health check and no previous known-good tag is recorded. Staging is left running the failed deployment."
-                        }
-                        bat """
-                            set IMAGE_TAG=${prev}
-                            docker compose --env-file .env.staging -f docker-compose.staging.yml up -d --force-recreate
-                        """
-                        if (!waitForHealthy('STAGING_PORT', 'Staging rollback')) {
-                            error "Deployment of ${IMAGE_TAG} failed its health check AND the rollback to ${prev} did not become healthy. Staging needs manual recovery."
-                        }
-                        error "Deployment of ${IMAGE_TAG} failed its health check. Rolled back to ${prev} and verified healthy."
-                    }
+                    def cfg = [label      : 'Staging',
+                               composeFile: 'docker-compose.staging.yml',
+                               envFile    : '.env.staging',
+                               portVar    : 'STAGING_PORT',
+                               stateFile  : "${DEPLOY_STATE}\\staging-last-good.txt",
+                               appService : 'app']
 
-                    // Image check 2 of 3.
-                    verifyArtefact('staging', 'robot-staging-app', 'Image')
+                    // Health, image identity and smoke checks are one validation: any
+                    // failure rolls back. The tag is recorded as known-good only after
+                    // all of them pass, so a bad release can never become a rollback target.
+                    def failure = null
+                    try {
+                        if (!waitForHealthy('STAGING_PORT', 'Staging')) {
+                            failure = 'health endpoint did not report healthy'
+                        } else {
+                            // Image check 2 of 3.
+                            verifyArtefact('staging', 'robot-staging-app', 'Image')
 
-                    // A health check confirms the app is listening and can reach its
-                    // database. It does not confirm which application is behind the port
-                    // or that authentication survived the deployment. These assertions are
-                    // read-only and need no credentials, so they are safe to run against a
-                    // live environment on every build.
-                    powershell '''
+                            // A health check confirms the app is listening and can reach its
+                            // database. It does not confirm which application is behind the
+                            // port or that authentication survived the deployment. These
+                            // assertions are read-only and need no credentials.
+                            powershell '''
                         $base = "http://localhost:$env:STAGING_PORT"
                         $failures = @()
 
@@ -605,8 +650,15 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                         }
                         Write-Host "Smoke test passed: 3/3"
                     '''
+                        }
+                    } catch (Exception err) {
+                        failure = err.getMessage()
+                    }
 
-                    writeFile file: "${DEPLOY_STATE}\\staging-last-good.txt", text: "${IMAGE_TAG}"
+                    if (failure) { failDeployment(cfg, failure) }
+
+                    writeFile file: cfg.stateFile, text: "${IMAGE_TAG}"
+                    echo "Staging validated - ${IMAGE_TAG} recorded as last known-good"
                 }
 
                 bat 'docker compose --env-file .env.staging -f docker-compose.staging.yml ps'
@@ -638,31 +690,29 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                 """
 
                 script {
-                    if (!waitForHealthy('PROD_PORT', 'Production')) {
-                        echo '*** PRODUCTION HEALTH CHECK FAILED - ROLLING BACK ***'
-                        def stateFile = "${DEPLOY_STATE}\\prod-last-good.txt"
-                        def prev = fileExists(stateFile) ? readFile(file: stateFile).trim() : ''
-                        if (!prev) {
-                            error "Release of ${IMAGE_TAG} failed its health check and no previous known-good tag is recorded. Production is left running the failed release."
-                        }
-                        bat """
-                            set IMAGE_TAG=${prev}
-                            docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --force-recreate
-                        """
-                        if (!waitForHealthy('PROD_PORT', 'Production rollback')) {
-                            error "Release of ${IMAGE_TAG} failed its health check AND the rollback to ${prev} did not become healthy. Production needs manual recovery."
-                        }
-                        error "Release of ${IMAGE_TAG} failed its health check. Rolled back to ${prev} and verified healthy."
-                    }
+                    def cfg = [label      : 'Production',
+                               composeFile: 'docker-compose.prod.yml',
+                               envFile    : '.env.prod',
+                               portVar    : 'PROD_PORT',
+                               stateFile  : "${DEPLOY_STATE}\\prod-last-good.txt",
+                               appService : 'app']
 
-                    // Image check 3 of 3: confirms production is running the image built
-                    // in stage 1 and tested in stage 2.
-                    verifyArtefact('production', 'robot-prod-app', 'Image')
+                    // Health, image identity, smoke checks and environment isolation are
+                    // one validation. Any failure rolls back production to its own last
+                    // known-good tag; staging is not touched.
+                    def failure = null
+                    try {
+                        if (!waitForHealthy('PROD_PORT', 'Production')) {
+                            failure = 'health endpoint did not report healthy'
+                        } else {
+                            // Image check 3 of 3: confirms production is running the image
+                            // built in stage 1 and tested in stage 2.
+                            verifyArtefact('production', 'robot-prod-app', 'Image')
 
-                    // The same read-only assertions as staging, repeated here because
-                    // staging passing only shows the image is good - it says nothing about
-                    // production's own config, database and network.
-                    powershell '''
+                            // The same read-only assertions as staging, repeated here because
+                            // staging passing only shows the image is good - it says nothing
+                            // about production's own config, database and network.
+                            powershell '''
                         $base = "http://localhost:$env:PROD_PORT"
                         $failures = @()
 
@@ -703,10 +753,11 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                         Write-Host "Smoke test passed: 3/3"
                     '''
 
-                    // Environment isolation check. If a config error pointed staging and
-                    // production at the same database or volume, every check above would
-                    // still pass and the fault would only surface later as corrupted data.
-                    powershell '''
+                            // Environment isolation check. If a config error pointed staging
+                            // and production at the same database or volume, every check
+                            // above would still pass and the fault would only surface later
+                            // as corrupted data.
+                            powershell '''
                         $s = (docker inspect --format "{{.Id}}" robot-staging-db) | Select-Object -Last 1
                         $p = (docker inspect --format "{{.Id}}" robot-prod-db)    | Select-Object -Last 1
                         if ($s.Trim() -eq $p.Trim()) {
@@ -723,8 +774,15 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                             exit 1
                         }
                     '''
+                        }
+                    } catch (Exception err) {
+                        failure = err.getMessage()
+                    }
 
-                    writeFile file: "${DEPLOY_STATE}\\prod-last-good.txt", text: "${IMAGE_TAG}"
+                    if (failure) { failDeployment(cfg, failure) }
+
+                    writeFile file: cfg.stateFile, text: "${IMAGE_TAG}"
+                    echo "Production validated - ${IMAGE_TAG} recorded as last known-good"
                 }
 
                 // Tag the released commit. @echo off keeps the token out of the console:
@@ -762,23 +820,53 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                     docker compose -f monitoring/docker-compose.monitoring.yml up -d
                 """
 
+                // Job names come from monitoring/prometheus.yml. A plain count would pass
+                // with the wrong targets up - cadvisor supplies container metrics and
+                // blackbox-health probes staging and production, and the alert rules
+                // depend on both.
                 powershell '''
+                    $required = @("cadvisor", "blackbox-health")
                     $ok = $false
                     for ($i = 0; $i -lt 24; $i++) {
                         try {
                             $r = Invoke-RestMethod -Uri "http://localhost:9090/api/v1/targets" -TimeoutSec 5
                             $active = $r.data.activeTargets
-                            $up = ($active | Where-Object { $_.health -eq "up" }).Count
-                            if ($up -ge 2) {
-                                Write-Host "Prometheus has $up healthy targets:"
-                                $active | ForEach-Object { Write-Host "  $($_.labels.job) -> $($_.health)" }
-                                $ok = $true
-                                break
+                            $missing = @()
+                            foreach ($job in $required) {
+                                $t = @($active | Where-Object { $_.labels.job -eq $job })
+                                if ($t.Count -eq 0)                                   { $missing += "$job (no targets)" }
+                                elseif (@($t | Where-Object { $_.health -ne "up" })) { $missing += "$job (not up)" }
                             }
+                            if ($missing.Count -eq 0) { $ok = $true; break }
                         } catch { }
                         Start-Sleep -Seconds 5
                     }
-                    if (-not $ok) { Write-Error "Prometheus targets never came up"; exit 1 }
+                    if (-not $ok) {
+                        Write-Error "Required Prometheus targets not up: $($missing -join ', ')"
+                        exit 1
+                    }
+                    Write-Host "Required Prometheus targets are up:"
+                    $active | ForEach-Object {
+                        Write-Host ("  {0,-18} {1,-6} {2}" -f $_.labels.job, $_.health, $_.labels.environment)
+                    }
+                '''
+
+                // Target health only proves Prometheus can scrape blackbox_exporter. This
+                // checks the production probe itself is succeeding, which is what
+                // ProductionDown actually alerts on.
+                powershell '''
+                    $ok = $false
+                    for ($i = 0; $i -lt 12; $i++) {
+                        try {
+                            $q = Invoke-RestMethod -TimeoutSec 5 -Uri ("http://localhost:9090/api/v1/query?query=" +
+                                 [uri]::EscapeDataString('probe_success{environment="production"}'))
+                            $v = @($q.data.result)
+                            if ($v.Count -gt 0 -and $v[0].value[1] -eq "1") { $ok = $true; break }
+                        } catch { }
+                        Start-Sleep -Seconds 5
+                    }
+                    if (-not $ok) { Write-Error "Prometheus is not reporting a successful production health probe"; exit 1 }
+                    Write-Host "  [pass] production /health probe succeeding"
                 '''
 
                 // Compose compares mount specs, not file contents, so it will not recreate
@@ -828,6 +916,50 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                     }
                     if (-not $ok) { Write-Error "Alert notification receiver is not reachable - alerts would fire into nothing"; exit 1 }
                     Write-Host "Notification receiver ready. Deliveries are visible with: docker logs robot-alert-logger"
+                '''
+
+                // End-to-end notification check. Posts a clearly-named CI alert straight
+                // to Alertmanager and confirms the receiver logged it, proving routing and
+                // delivery without stopping a real service. Resolved immediately afterwards
+                // so nothing is left firing. Does not exercise Prometheus rule evaluation -
+                // that path is demonstrated separately by stopping the production container.
+                powershell '''
+                    $amUrl = "http://localhost:9093/api/v2/alerts"
+                    $now   = (Get-Date).ToUniversalTime()
+
+                    function Send-CIAlert([datetime]$ends) {
+                        $a = @{
+                            labels      = @{ alertname   = "CISyntheticAlert"
+                                             severity    = "info"
+                                             environment = "ci"
+                                             origin      = "jenkins-pipeline" }
+                            annotations = @{ summary = "CI notification-path verification. Not a real incident." }
+                            startsAt    = $now.ToString("o")
+                            endsAt      = $ends.ToString("o")
+                        }
+                        # ConvertTo-Json unwraps a single-element array; Alertmanager needs a list.
+                        $body = "[" + ($a | ConvertTo-Json -Depth 6 -Compress) + "]"
+                        Invoke-RestMethod -Uri $amUrl -Method Post -Body $body -ContentType "application/json" -TimeoutSec 10 | Out-Null
+                    }
+
+                    Send-CIAlert $now.AddMinutes(3)
+                    Write-Host "Synthetic alert posted to Alertmanager, waiting for delivery..."
+
+                    $delivered = $false
+                    for ($i = 0; $i -lt 18; $i++) {
+                        Start-Sleep -Seconds 5
+                        $logs = (docker logs --since 5m robot-alert-logger 2>&1) | Out-String
+                        if ($logs -match "CISyntheticAlert") { $delivered = $true; break }
+                    }
+
+                    # Resolve it either way so the synthetic condition is never left active.
+                    Send-CIAlert (Get-Date).ToUniversalTime()
+
+                    if (-not $delivered) {
+                        Write-Error "Synthetic alert was accepted by Alertmanager but never reached the receiver - the notification path is broken"
+                        exit 1
+                    }
+                    Write-Host "  [pass] synthetic alert delivered end to end after $($i*5)s, then resolved"
                 '''
 
                 // Traceability manifest: ties the build number to the commit, image ID,
