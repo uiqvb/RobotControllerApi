@@ -35,7 +35,7 @@ public class CompensationBuilderTests
 
         var node = JsonNode.Parse(inversePayload)!.AsObject();
 
-        node["distanceCm"]!.GetValue<double>().Should().Be(40);
+        node["distanceCm"]!.GetValue<double>().Should().Be(-40);
     }
 
     [Theory]
