@@ -84,7 +84,13 @@ def waitForHealthy(String portVar, String label) {
  * Without one: stops the failed app container rather than leaving it serving.
  * Only the app service is touched - databases, volumes and networks are left alone.
  *
- * `cfg` keys: label, composeFile, envFile, portVar, stateFile, appService.
+ * CONFIG ROLLBACK CHANGE - rollback restores the previous known-good *configuration*
+ * as well as the previous image tag. Redeploying the old tag against the new, broken
+ * env file reproduces the failure it is trying to escape: the config is the thing that
+ * broke. The snapshot in cfg.stateEnv is written only after a deployment has passed
+ * every check, so it can never be a broken config.
+ *
+ * `cfg` keys: label, composeFile, envFile, portVar, stateFile, stateEnv, appService.
  */
 def failDeployment(Map cfg, String reason) {
     def prev = fileExists(cfg.stateFile) ? readFile(file: cfg.stateFile).trim() : ''
@@ -101,7 +107,20 @@ def failDeployment(Map cfg, String reason) {
 Manual investigation required.""")
     }
 
-    echo "*** ${cfg.label.toUpperCase()} VERIFICATION FAILED - ROLLING BACK TO ${prev} ***"
+    echo "*** ${cfg.label.toUpperCase()} HEALTH CHECK FAILED - ROLLING BACK ***"
+
+    // CONFIG ROLLBACK CHANGE - restore the known-good config before recreating the
+    // container. Written over the workspace env file rather than passed as a second
+    // --env-file path, so the old config reaches the container whether the compose
+    // file interpolates variables from --env-file or declares env_file: internally.
+    // Copied with `copy`, never read into Groovy, so no value can reach the console.
+    if (fileExists(cfg.stateEnv)) {
+        bat "copy /Y \"${cfg.stateEnv}\" \"%WORKSPACE%\\${cfg.envFile}\" >nul"
+        echo "Restored previous known-good ${cfg.label.toLowerCase()} configuration from the deploy state store"
+    } else {
+        echo "No ${cfg.label.toLowerCase()} configuration snapshot recorded yet - rolling back the image tag only"
+    }
+
     bat """
         set IMAGE_TAG=${prev}
         docker compose --env-file ${cfg.envFile} -f ${cfg.composeFile} up -d --force-recreate ${cfg.appService}
@@ -110,12 +129,16 @@ Manual investigation required.""")
     if (!waitForHealthy(cfg.portVar, "${cfg.label} rollback")) {
         error("""${cfg.label} deployment of ${env.IMAGE_TAG} failed verification AND the rollback to ${prev} did not become healthy.
   reason : ${reason}
-Manual recovery required.""")
+  image and configuration were both restored, so this is not a stale-config failure.
+MANUAL RECOVERY REQUIRED - ${cfg.label.toLowerCase()} is not serving a known-good release.""")
     }
+
+    // CONFIG ROLLBACK CHANGE - exact wording the demo points at.
+    echo "Rolled back ${cfg.label.toLowerCase()} to ${prev} and verified healthy"
 
     error("""${cfg.label} deployment of ${env.IMAGE_TAG} failed verification.
   reason         : ${reason}
-  rolled back to : ${prev}, verified healthy""")
+  rolled back to : ${prev}, with its matching known-good configuration, verified healthy""")
 }
 
 pipeline {
@@ -145,6 +168,10 @@ pipeline {
         TEST_PORT       = '8092'
 
         // Where we remember the last known-good tag per environment, for rollback.
+        // CONFIG ROLLBACK CHANGE - also holds the matching known-good env file per
+        // environment (<env>-last-good.env). Outside the workspace and outside the
+        // repo, never archived, so config snapshots are not exposed as build
+        // artifacts and cannot be committed.
         DEPLOY_STATE    = 'C:\\ProgramData\\jenkins-deploy-state'
 
         // Version installed and verified working in builds 6, 7 and 9.
@@ -562,6 +589,10 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
         // before the stage fails; with no previous release the failed candidate app is
         // stopped instead. Rollback depends on that tag's image still being present
         // locally - see the note on image pruning in the final post block.
+        //
+        // CONFIG ROLLBACK CHANGE - the image tag and the env file that was running with
+        // it are recorded together, and restored together. A bad ENV_STAGING is rolled
+        // back the same way a bad image is.
         // =====================================================================
         stage('Deploy to Staging') {
             steps {
@@ -575,6 +606,10 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                     def stateFile = "${DEPLOY_STATE}\\staging-last-good.txt"
                     def prev = fileExists(stateFile) ? readFile(file: stateFile).trim() : ''
                     echo "Previous known-good staging tag: ${prev ?: 'none - this is the first deploy'}"
+
+                    // CONFIG ROLLBACK CHANGE - report only whether a snapshot exists.
+                    // Never its contents.
+                    echo "Previous known-good staging config: ${fileExists("${DEPLOY_STATE}\\staging-last-good.env") ? 'recorded' : 'none recorded yet'}"
                 }
 
                 bat """
@@ -588,6 +623,8 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                                envFile    : '.env.staging',
                                portVar    : 'STAGING_PORT',
                                stateFile  : "${DEPLOY_STATE}\\staging-last-good.txt",
+                               // CONFIG ROLLBACK CHANGE
+                               stateEnv   : "${DEPLOY_STATE}\\staging-last-good.env",
                                appService : 'app']
 
                     // Health, image identity and smoke checks are one validation: any
@@ -660,7 +697,16 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                     if (failure) { failDeployment(cfg, failure) }
 
                     writeFile file: cfg.stateFile, text: "${IMAGE_TAG}"
-                    echo "Staging validated - ${IMAGE_TAG} recorded as last known-good"
+
+                    // CONFIG ROLLBACK CHANGE - snapshot the config that was running when
+                    // every check passed, next to the tag it passed with. Recorded only
+                    // here, after full validation, so a failed release can never become a
+                    // rollback target - the same rule the tag already followed.
+                    bat """
+                        if not exist "${DEPLOY_STATE}" mkdir "${DEPLOY_STATE}"
+                        copy /Y "%WORKSPACE%\\${cfg.envFile}" "${cfg.stateEnv}" >nul
+                    """
+                    echo "Staging validated - ${IMAGE_TAG} and its configuration recorded as last known-good"
                 }
 
                 bat 'docker compose --env-file .env.staging -f docker-compose.staging.yml ps'
@@ -680,6 +726,10 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
         // Deployment verification is health check, image identity, smoke tests and
         // environment isolation. Same failure contract as staging, against production's
         // own known-good tag.
+        //
+        // CONFIG ROLLBACK CHANGE - production keeps its own tag and its own config
+        // snapshot, entirely separate from staging's. A staging rollback never reads or
+        // writes production state.
         // =====================================================================
         stage('Release to Production') {
             steps {
@@ -698,6 +748,8 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                                envFile    : '.env.prod',
                                portVar    : 'PROD_PORT',
                                stateFile  : "${DEPLOY_STATE}\\prod-last-good.txt",
+                               // CONFIG ROLLBACK CHANGE
+                               stateEnv   : "${DEPLOY_STATE}\\prod-last-good.env",
                                appService : 'app']
 
                     // Health, image identity, smoke checks and environment isolation are
@@ -785,7 +837,13 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                     if (failure) { failDeployment(cfg, failure) }
 
                     writeFile file: cfg.stateFile, text: "${IMAGE_TAG}"
-                    echo "Production validated - ${IMAGE_TAG} recorded as last known-good"
+
+                    // CONFIG ROLLBACK CHANGE - see the staging equivalent.
+                    bat """
+                        if not exist "${DEPLOY_STATE}" mkdir "${DEPLOY_STATE}"
+                        copy /Y "%WORKSPACE%\\${cfg.envFile}" "${cfg.stateEnv}" >nul
+                    """
+                    echo "Production validated - ${IMAGE_TAG} and its configuration recorded as last known-good"
                 }
 
                 // Tag the released commit. @echo off keeps the token out of the console:
