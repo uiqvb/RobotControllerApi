@@ -74,8 +74,15 @@ AppContext.SetSwitch("Npgsql.EnableLegacyTimestampBehavior", true);
 // Container health probe. The production image is chiselled Ubuntu: no shell and no
 // curl, so the Dockerfile HEALTHCHECK cannot shell out to an HTTP client. Instead it
 // runs this same assembly with --healthcheck, which calls /health on the local
-// listener and exits 0 or 1. Nothing else in the app starts in this mode.
-if (args.Length == 1 && args[0] == "--healthcheck")
+// listener and exits 0 (healthy) or 1. Nothing else in the app starts in this mode.
+// Exercised in stage 2 of the pipeline against a live API, a dead port, and the
+// default port.
+if (args.Contains("--healthcheck"))
+{
+    Environment.Exit(await ProbeHealthAsync());
+}
+
+static async Task<int> ProbeHealthAsync()
 {
     var port = (Environment.GetEnvironmentVariable("ASPNETCORE_HTTP_PORTS") ?? "8080")
         .Split(';', ',')[0].Trim();
@@ -83,11 +90,13 @@ if (args.Length == 1 && args[0] == "--healthcheck")
     try
     {
         var health = await probe.GetAsync($"http://localhost:{port}/health");
-        Environment.Exit(health.IsSuccessStatusCode ? 0 : 1);
+        health.EnsureSuccessStatusCode();
+        return 0;
     }
-    catch
+    catch (Exception)
     {
-        Environment.Exit(1);
+        // Not listening, timed out, or answered with a non-success status.
+        return 1;
     }
 }
 

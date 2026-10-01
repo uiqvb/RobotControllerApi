@@ -420,6 +420,24 @@ pipeline {
                         dotnet test -c Release --no-build --filter "Category=Integration"
                 """
 
+                // The container health probe (dotnet RobotControllerApi.dll
+                // --healthcheck, see Program.cs) is the production image's
+                // HEALTHCHECK. Tested here three ways, each run under coverage:
+                // against the live API (must exit 0), against a dead port (must
+                // exit 1), and with no port configured (default 8080, must exit 0).
+                bat """
+                    docker exec robot-cov-app dotnet-coverage collect -f cobertura -o /testresults/coverage-raw/probe-healthy.cobertura.xml "dotnet RobotControllerApi.dll --healthcheck"
+                    if errorlevel 1 (echo Health probe FAILED: reported a healthy API as unhealthy & exit /b 1)
+
+                    docker exec -e ASPNETCORE_HTTP_PORTS=1 robot-cov-app dotnet-coverage collect -f cobertura -o /testresults/coverage-raw/probe-down.cobertura.xml "dotnet RobotControllerApi.dll --healthcheck"
+                    if not errorlevel 1 (echo Health probe FAILED: reported a dead port as healthy & exit /b 1)
+
+                    docker exec robot-cov-app env -u ASPNETCORE_HTTP_PORTS dotnet-coverage collect -f cobertura -o /testresults/coverage-raw/probe-default.cobertura.xml "dotnet RobotControllerApi.dll --healthcheck"
+                    if errorlevel 1 (echo Health probe FAILED on the default port & exit /b 1)
+
+                    echo Health probe verified: live API 0, dead port 1, default port 0
+                """
+
                 // Shutting the session down makes dotnet-coverage stop the API and
                 // write its report; docker wait returns once that has finished.
                 // Bounded, so a session that never shuts down cannot hang the build.
@@ -430,8 +448,9 @@ pipeline {
                     """
                 }
 
-                // Merges unit + integration into one report: HTML for people, JSON
-                // for the gate below, Cobertura for anything else that wants it.
+                // Merges unit + integration + probe coverage into one report: HTML
+                // for people, JSON for the gate below, SonarQube generic format for
+                // stage 3, Cobertura for anything else that wants it.
                 // Filtered to the application assembly - framework and NuGet code
                 // the API loaded is not ours to cover.
                 bat """
@@ -439,9 +458,9 @@ pipeline {
                         -v "%WORKSPACE%\\testresults:/testresults" ^
                         %IMAGE_NAME%:%TEST_IMAGE_TAG% ^
                         reportgenerator ^
-                            "-reports:/testresults/*/coverage.cobertura.xml;/testresults/coverage-raw/integration.cobertura.xml" ^
+                            "-reports:/testresults/*/coverage.cobertura.xml;/testresults/coverage-raw/*.cobertura.xml" ^
                             -targetdir:/testresults/coverage ^
-                            "-reporttypes:Html;TextSummary;JsonSummary;Cobertura" ^
+                            "-reporttypes:Html;TextSummary;JsonSummary;Cobertura;SonarQube" ^
                             "-assemblyfilters:+RobotControllerApi" ^
                             -verbosity:Warning
                 """
@@ -537,6 +556,14 @@ apt-get update -qq
 apt-get install -y -qq --no-install-recommends openjdk-17-jre-headless > /dev/null
 java -version
 
+# COVERAGE CHANGE - stage 2's merged coverage, in SonarQube's generic format,
+# so the quality gate's coverage-on-new-code condition is measured rather than
+# read as zero. Paths in it are the test image's (/src/...); the analysis runs
+# in /build, so they are rewritten to match. Copied out before /build is reset.
+echo "--- preparing coverage report for SonarCloud ---"
+sed 's#path="/src/#path="/build/#' /src/testresults/coverage/SonarQube.xml > /tmp/sonar-coverage.xml
+grep -c "<file " /tmp/sonar-coverage.xml
+
 echo "--- copying source out of the bind mount ---"
 # MSBuild cannot write bin/ into a Windows bind mount from inside a Linux
 # container - it fails with MSB3021 "Access to the path is denied" on every
@@ -564,7 +591,8 @@ dotnet sonarscanner begin \\
     /d:sonar.host.url="$SONAR_HOST" \\
     /d:sonar.token="$SONAR_TOKEN" \\
     /d:sonar.exclusions="**/bin/**,**/obj/**,**/Migrations/**,**/*.sql,**/wwwroot/**,**/TestResults/**" \\
-    /d:sonar.qualitygate.wait=true
+    /d:sonar.qualitygate.wait=true \\
+    /d:sonar.coverageReportPaths=/tmp/sonar-coverage.xml
 
 echo "--- build under analysis ---"
 dotnet build --no-incremental
