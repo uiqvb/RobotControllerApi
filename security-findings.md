@@ -1,258 +1,112 @@
 # Security findings — RobotControllerApi
 
-**Artefact scanned:** `myapp:1.0.6` (image ID `sha256:5fd41f052444…`) — the exact image built in
-stage 1 of build #6 and released to production, not a rebuild.
-**Scanner:** Aqua Trivy (`aquasec/trivy:latest`, schema v2), scanners `vuln` and `secret`.
-**Scan date:** 20 September 2026.
+**Policy version:** 2 — 1 October 2026. Supersedes the 20 September version, which gated only on
+fixable CRITICAL findings.
+**Artefact scanned:** the image built in stage 1 of each build, never a rebuild.
+**Scanner:** Aqua Trivy `0.58.1` (pinned), scanners `vuln`, `secret` and `config`.
 **Pipeline stage:** Stage 4 — Security.
+**Owner of every decision below:** Manit Khera.
 
-Every finding below is recorded with three things, as the task brief requires: **what it is**, its
-**severity**, and **whether and how it was addressed** — fixed, justified, or mitigated.
-
----
-
-## 1. How scanning is performed
-
-The Security stage runs Trivy three times against the image, deliberately:
-
-| Pass | Command shape | Exit behaviour | Purpose |
-|---|---|---|---|
-| 1 | `--severity LOW,MEDIUM,HIGH,CRITICAL --format table` | never fails | Human-readable report, archived as a build artefact |
-| 2 | `--scanners vuln,secret --format json` | never fails | Machine-readable record for this document |
-| 3 | `--severity CRITICAL --exit-code 1 --ignore-unfixed` | **fails the build** | The enforcement gate |
-
-Separating *reporting* from *enforcement* is the key design decision. If the only Trivy invocation
-were the blocking one, a failed build would produce no evidence of *why* it failed, and a passing
-build would produce no evidence at all. Reporting first means there is always a complete record
-attached to every build, pass or fail.
-
-This stage is kept conceptually distinct from stage 3 (Code Quality). Code Quality asks *"is this
-code healthy for the developers who maintain it"* — duplication, complexity, smells. Security asks
-*"what can an attacker do to this artefact and its users"*. They are different questions with
-different audiences and different remediation owners, and conflating them is a common mistake.
+Every HIGH or CRITICAL finding in this document has an explicit decision: **remediated**, or
+**excepted with a compensating control and a review date**. Nothing is accepted indefinitely.
 
 ---
 
-## 2. Results summary
+## 1. What changed in version 2, and why
 
-Scan of `myapp:1.0.6`, all severities, both scanners:
+The 7.3HD feedback named three gaps in version 1:
 
-| Target | Class | CRITICAL | HIGH | MEDIUM | LOW | UNKNOWN | Total |
-|---|---|---:|---:|---:|---:|---:|---:|
-| `myapp:1.0.6` (debian 12.15), 107 OS packages | os-pkgs | 4 | 63 | 121 | 121 | 1 | **310** |
-| `app/RobotControllerApi.deps.json` | lang-pkgs (dotnet-core) | 0 | 0 | 0 | 0 | 0 | **0** |
-| `Microsoft.AspNetCore.App/8.0.31` | lang-pkgs (dotnet-core) | 0 | 0 | 0 | 0 | 0 | **0** |
-| `Microsoft.NETCore.App/8.0.31` | lang-pkgs (dotnet-core) | 0 | 0 | 0 | 0 | 0 | **0** |
-| Secret scan (whole filesystem) | secret | — | — | — | — | — | **0** |
+1. The gate covered only CRITICAL findings with a fix available. HIGH findings had no decision.
+2. Configuration issues were scanned but never enforced.
+3. `--ignore-unfixed` let unfixable findings pass with no review schedule. **An unavailable fix
+   does not remove the risk.**
 
-Two numbers matter more than the total:
+Version 2 answers each one, and the first answer was to remove the findings rather than write
+better reasons for keeping them:
 
-**Zero findings in the application's own dependency tree.** Every one of the 310 findings is in a
-Debian 12 base-image package inherited from `mcr.microsoft.com/dotnet/aspnet:8.0`. Not one comes
-from a NuGet package this project chose, or from ASP.NET Core itself. The dependency hygiene of the
-application is clean.
+| | Version 1 (Debian 12 base) | Version 2 (chiselled Ubuntu base) |
+|---|---:|---:|
+| CRITICAL | 4 | **0** |
+| HIGH | 63 | **2** (one CVE, reported against two packages) |
+| MEDIUM | 121 | 9 |
+| LOW | 121 | 11 |
+| **Total** | **310** | **22** |
+| Secrets | 0 | 0 |
+| Application (NuGet) findings | 0 | 0 |
 
-**Zero of 310 findings have a fixed version available.** This is the single most important fact in
-this document and it is what makes the gate policy defensible — see §3.
+## 2. Remediation: rebase onto a chiselled runtime image (M1, done)
 
-**Zero secrets detected.** No credentials, tokens, connection strings or private keys are baked
-into the image. This is by construction, not luck: the Dockerfile sets only non-sensitive
-configuration (`ASPNETCORE_HTTP_PORTS`, telemetry opt-outs), and every environment-specific value
-arrives at `docker run` time from `.env.staging` / `.env.prod`, which are gitignored and stored as
-Jenkins *Secret file* credentials. They are written into the workspace during the Deploy and
-Release stages and deleted in those stages' `post { always }` blocks.
+Version 1 recorded that **61 of the 63 HIGH findings, and all 4 CRITICAL ones, sat in Debian
+packages the application never uses** — `perl-base`, `util-linux`, `ncurses`, `zlib` tooling — plus
+10 in the `curl` our own Dockerfile added for the health check. It also recorded the fix and
+deferred it: rebase onto `mcr.microsoft.com/dotnet/aspnet:8.0-noble-chiseled-extra`.
 
----
+That is now done. A chiselled image contains the .NET runtime and its native libraries and nothing
+else: **no shell, no package manager, no curl, no perl, no util-linux.** Removing the packages
+removes the findings — a stronger result than any exception could give. `-extra` adds ICU and
+tzdata, so culture and time-zone behaviour match the old image.
 
-## 3. The enforcement gate, and why `--ignore-unfixed`
+The one cost was the health check. The old `HEALTHCHECK` shelled out to `curl`; a chiselled image
+has neither a shell nor curl. The app now probes itself: `dotnet RobotControllerApi.dll
+--healthcheck` calls `/health` on the local listener and exits 0 or 1 (top of `Program.cs`), run
+in exec form. Verified before commit: the container reports `healthy`, runs as UID 1654 (the
+image's built-in non-root user), and the integration suite passes 7/7 against it.
 
-```
-trivy image --scanners vuln --severity CRITICAL --exit-code 1 --ignore-unfixed myapp:1.0.6
-```
+The build now also runs `docker build --pull`, so the newest patched base is fetched every build
+and upstream OS fixes arrive without a code change.
 
-The gate fails the build on any **CRITICAL** vulnerability **for which a fix exists**. It currently
-passes. That deserves an explicit justification rather than being quietly relied upon.
+## 3. The gate policy
 
-**Why CRITICAL and not HIGH.** A gate that fires on every build teaches the team to bypass it. With
-63 HIGH findings, none of them fixable, a HIGH-level gate would block every single build
-permanently, and the only way to ship would be to disable the gate — which is strictly worse than
-having a narrower one that is genuinely respected. The HIGH findings are not ignored; they are
-reported, archived, and reviewed in this document.
+Enforced in stage 4 of the `Jenkinsfile`, in this order:
 
-**Why `--ignore-unfixed`.** Without it the gate fails the build on the four CRITICALs in §4 — and
-there is no action the build could take to pass, because Debian has published no patched package
-for any of them. A gate that cannot be satisfied by any legitimate change is not a control; it is
-an outage. `--ignore-unfixed` narrows enforcement to *actionable* findings: the moment Debian ships
-a fix for any of these, the flag stops suppressing it and the next build fails until the base image
-is rebased. The flag defers the finding, it does not dismiss it.
+| # | Rule | How it is enforced |
+|---|---|---|
+| 1 | **Any HIGH or CRITICAL vulnerability or secret fails the build, fixable or not.** | `trivy image --severity HIGH,CRITICAL --exit-code 1`. No `--ignore-unfixed`. |
+| 2 | The only way past rule 1 is an explicit exception in `.trivyignore.yaml`. | `--ignorefile /project/.trivyignore.yaml` |
+| 3 | Every exception has a statement (decision, reason, compensating control, owner) and a **review date no more than 30 days out**. | A PowerShell check validates the file *before* Trivy reads it and fails the stage on a missing statement, a missing date, or a date beyond `MAX_EXCEPTION_DAYS`. |
+| 4 | **On the review date the exception expires**, the finding counts again, and the build fails until someone re-decides. | Trivy's `expired_at`. The review schedule is enforced by the pipeline, not by memory. |
+| 5 | Any HIGH or CRITICAL **Dockerfile misconfiguration** fails the build, under the same exception rules. | `trivy config --severity HIGH,CRITICAL --exit-code 1`. Currently 0 findings. `--skip-check-update` pins the checks to the Trivy version so the result cannot shift between builds. |
+| 6 | MEDIUM and LOW are reported and archived on every build, not gated. | Full table and JSON archived per build; summary in the build manifest. |
 
-**What the gate would actually catch.** A newly introduced NuGet package with a known critical CVE;
-a base image that has drifted behind an available security update; a critical vulnerability
-disclosed and patched between one build and the next. All three are real, common, and actionable —
-and all three are exactly what an image scanner is worth having for.
+**Why the gate can be this strict now.** Version 1 argued that a HIGH gate over 63 unfixable
+findings would block every build until someone disabled it. That was true of that image. With the
+packages gone the HIGH count is one CVE, so the stricter gate is enforceable and stays on.
 
----
+**What the reports show.** The two report passes run *without* the exceptions file, so the
+archived record always shows everything Trivy found, excepted or not. Only the gate reads
+exceptions. The console summary splits HIGH/CRITICAL findings into "covered by an active
+exception" and "not covered — these gate".
 
-## 4. CRITICAL findings — all four, individually
+## 4. Exceptions register
 
-All four are unfixed upstream. Disposition for each is **mitigated and accepted**, with reasoning.
+One exception is active. Its source of truth is `.trivyignore.yaml`; this is the reasoning.
 
-### 4.1 CVE-2023-45853 — `zlib1g` 1:1.2.13.dfsg-1
-**Severity:** CRITICAL. **Upstream status:** `will_not_fix`.
-**What it is:** Integer overflow leading to a heap buffer overflow in minizip's
-`zipOpenNewFileInZip4_6`, reachable when a caller passes an attacker-controlled filename longer
-than 64 KB into the zip-writing helper.
-**Whether addressed:** Mitigated by non-reachability, accepted. The vulnerable function lives in
-minizip, a *contributed utility* bundled in the zlib source tree, not in the zlib library API. The
-application never writes zip archives and never invokes minizip. Debian has classified it
-`will_not_fix` on the same reasoning — the affected code is not compiled into the shipped
-`zlib1g` library. There is no patched package to install.
-**Residual risk:** Negligible. No code path in the container reaches the vulnerable function.
+### 4.1 CVE-2026-84782 — `openssl` / `libssl3t64` 3.0.13-0ubuntu3.15
 
-### 4.2 CVE-2026-13221 — `perl-base` 5.36.0-7+deb12u3
-**Severity:** CRITICAL. **Upstream status:** `affected`, no fix published.
-**What it is:** Incorrect regular-expression processing when compiling very large regular
-expressions, leading to memory corruption.
-**Whether addressed:** Mitigated by non-reachability, accepted.
-**Residual risk:** Negligible — see the shared reasoning in §4.5.
+| | |
+|---|---|
+| **Severity** | HIGH (reported once per package, so it appears as 2 findings) |
+| **What it is** | Information disclosure through DTLS handshake retransmission |
+| **Fix status** | Fixed in Ubuntu `3.0.13-0ubuntu3.16`. **Not yet in the Microsoft chiselled base image**, which has no package manager and so cannot be patched in place. |
+| **Decision** | Excepted until **15 October 2026** |
+| **Why** | Not reachable. DTLS is TLS over UDP. The API serves plain HTTP over TCP, bound to loopback, and opens no UDP sockets. |
+| **Compensating control** | `docker build --pull` fetches the newest base every build. When Microsoft republishes the image with 3.16, the next build picks it up and the finding disappears with no code change. |
+| **On review** | If the base has been republished, delete the exception. If not, re-check reachability and renew for at most 30 days with the reason stated again. |
 
-### 4.3 CVE-2026-42496 — `perl-base` 5.36.0-7+deb12u3
-**Severity:** CRITICAL. **Upstream status:** `fix_deferred`.
-**What it is:** Path traversal in `Archive::Tar` via crafted symlinks inside an archive, allowing a
-malicious tarball to write outside the extraction directory.
-**Whether addressed:** Mitigated by non-reachability, accepted. The application extracts no
-archives and executes no Perl.
-**Residual risk:** Negligible.
+## 5. MEDIUM and LOW findings
 
-### 4.4 CVE-2026-8376 — `perl-base` 5.36.0-7+deb12u3
-**Severity:** CRITICAL. **Upstream status:** `affected`, no fix published.
-**What it is:** Heap buffer overflow when compiling regular expressions on 32-bit builds.
-**Whether addressed:** Mitigated by non-reachability *and* by architecture, accepted. The container
-runs on x86-64; the overflow is specific to 32-bit builds, so it is not exploitable on this image
-even if Perl were reachable.
-**Residual risk:** None on this platform.
+20 findings (9 MEDIUM, 11 LOW), all in the chiselled base's own libraries (`libc6`, `zlib1g`,
+`libicu74` and similar). Some have a fix upstream; none can be applied in place. They are not
+gated, by design: rule 6 above. They are reported on every build, they shrink automatically as
+Microsoft republishes the base, and they are reviewed at the same time as the exceptions register.
+If one is re-rated HIGH, the gate catches it on the next build.
 
-### 4.5 Shared reasoning for the three `perl-base` findings
-
-Exploiting any of these requires the attacker to cause the container to **execute Perl** with
-attacker-influenced input. In this image that cannot happen through the application:
-
-- The entrypoint is `dotnet RobotControllerApi.dll`. No shell, no script interpreter, no Perl.
-- The application contains no `Process.Start`, no shell-out, and no code path that invokes an
-  external binary.
-- The container runs as the unprivileged user `appuser` (UID 5678, no home directory, no shell
-  login), so even arbitrary local execution would be confined.
-- `perl-base` is present only because it is an `Essential: yes` package in every Debian base image.
-  It is a transitive consequence of the base-image choice, not a dependency this project introduced
-  or can remove with `apt-get remove` (doing so would break the package manager).
-
-The honest summary: these are real vulnerabilities in code that ships inside the image, they are
-not reachable from the attack surface this application actually exposes, and no upstream fix
-exists to apply. They are accepted, recorded here, and re-evaluated on every build.
-
----
-
-## 5. HIGH findings — 63, grouped by package
-
-None of the 63 has a fixed version available. Grouped by the package that carries them:
-
-| Package | Findings | Origin | Reachable from the app? | Disposition |
-|---|---:|---|---|---|
-| `curl` | 5 | **Added by our Dockerfile** | Only via HEALTHCHECK — see §6 | Accepted, documented |
-| `libcurl4` | 5 | **Added by our Dockerfile** | Only via HEALTHCHECK — see §6 | Accepted, documented |
-| `perl-base` | 5 | Debian `Essential` | No | Accepted (§4.5) |
-| `util-linux` | 5 | Debian base | No | Accepted |
-| `util-linux-extra` | 5 | Debian base | No | Accepted |
-| `bsdutils` | 5 | Debian base | No | Accepted |
-| `mount` | 5 | Debian base | No — container cannot mount | Accepted |
-| `libmount1` | 5 | Debian base | No | Accepted |
-| `libblkid1` | 5 | Debian base | No | Accepted |
-| `libuuid1` | 5 | Debian base | No | Accepted |
-| `libsmartcols1` | 5 | Debian base | No | Accepted |
-| `libldap-2.5-0` | 1 | Debian base | No — no LDAP auth configured | Accepted |
-| `libsystemd0` | 1 | Debian base | No — no init system in container | Accepted |
-| `libudev1` | 1 | Debian base | No — no device management | Accepted |
-| `ncurses-base` | 1 | Debian base | No — no TTY | Accepted |
-| `ncurses-bin` | 1 | Debian base | No — no TTY | Accepted |
-| `libtinfo6` | 1 | Debian base | No — no TTY | Accepted |
-| `gzip` | 1 | Debian base | No | Accepted |
-| `libacl1` | 1 | Debian base | No | Accepted |
-
-The pattern is consistent and worth stating plainly: **61 of the 63 HIGH findings are in packages
-that exist in the image only because Debian ships them, and that the application never calls.** The
-container has no shell session, no init system, no TTY, no device access and no mount capability.
-The `util-linux` family alone accounts for 30 findings in tooling (`mount`, `blkid`, `lsblk`,
-`fdisk`) that is inert inside an unprivileged application container.
-
-The remaining two packages — `curl` and `libcurl4`, 10 findings between them — are different,
-because we put them there.
-
----
-
-## 6. The one finding we caused ourselves — `curl`
-
-This is the most actionable item in this document, and the only one traceable to a decision in our
-own `Dockerfile` rather than to the base image.
-
-```dockerfile
-# curl is here solely for HEALTHCHECK; the runtime image ships without one.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
-```
-
-**What it is.** One line adds `curl` and `libcurl4`, contributing **10 HIGH findings**
-(CVE-2026-12064, CVE-2026-6276, CVE-2026-8286, CVE-2026-8458, CVE-2026-8927 — each reported against
-both packages) — 16% of all HIGH findings in the image.
-
-**Severity:** HIGH ×10, all unfixed in Debian 12.
-
-**Why it is there.** The image declares:
-
-```dockerfile
-HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
-    CMD curl -fsS "http://localhost:${ASPNETCORE_HTTP_PORTS}/health" || exit 1
-```
-
-That HEALTHCHECK is load-bearing, not decorative. The compose stacks use
-`depends_on: condition: service_healthy` for ordering, and the pipeline's own deploy verification
-reads container health. Removing `curl` without a replacement probe would silently disable
-dependency ordering across all three environments.
-
-**Whether addressed.** **Accepted with justification, with a costed remediation path recorded
-below.** The reasoning:
-
-1. All 10 findings are unfixed in Debian 12, so `apt-get upgrade` cannot resolve them.
-2. `curl` is never invoked by the application. It is executed only by the Docker daemon's health
-   probe, against `http://localhost:8080/health` — a fixed, hard-coded, non-attacker-controllable
-   URL on the container's own loopback interface. The typical `curl` exploitation pattern, in which
-   an attacker steers a request to a URL of their choosing, has no analogue here.
-3. It runs as `appuser`, unprivileged.
-
-**Remediation path, and why it was not taken tonight.** The clean fix is to rebase the production
-stage onto a chiselled runtime image — `mcr.microsoft.com/dotnet/aspnet:8.0-noble-chiseled` — which
-ships without a package manager, without a shell, and without `curl`, `perl`, `util-linux` or
-`ncurses`. That would remove the great majority of the 310 findings at a stroke, because it removes
-the packages rather than patching them.
-
-The trade-off is that a chiselled image **has no shell**, which means the `HEALTHCHECK` above stops
-working, which means `depends_on: service_healthy` stops working in all three compose files. The
-replacement is a small self-contained health-probe binary published alongside the app and invoked
-in exec form. That is a genuine, worthwhile change — and it is a change to the container contract
-that every environment depends on, so it belongs in its own change with its own verification run,
-not bolted on beside an assessment deadline. It is recorded in §9 as the top remediation item.
-
-Recording this honestly is the point. The finding is real, we caused it, we understand the fix, we
-can state its cost, and we made a deliberate decision to defer it rather than discovering it later.
-
----
-
-## 7. Application-layer findings (not detected by Trivy)
+## 6. Application-layer findings (not detected by Trivy)
 
 Image scanning finds vulnerable *packages*. It cannot find vulnerable *logic*. These came from
 manual review of the application's own code and are recorded here for completeness.
 
-### 7.1 First-registration Admin bootstrap
+### 6.1 First-registration Admin bootstrap
 **What it is.** `POST /api/auth/register` is `[AllowAnonymous]`. `AuthService.Register` applies a
 bootstrap rule:
 
@@ -284,9 +138,9 @@ is not externally reachable in this deployment. Two remediation options were con
 
 The second is a two-line change, but it would break integration test I7 and the test fixture, which
 register users to obtain credentials — so it needs test changes alongside it. Recorded as
-remediation item 2 in §9.
+remediation item M2 in §8.
 
-### 7.2 Anonymous self-registration enabled in production
+### 6.2 Anonymous self-registration enabled in production
 **What it is.** Beyond the bootstrap case, any unauthenticated caller reaching the production
 listener can create a `User` account.
 **Severity:** LOW in this deployment.
@@ -294,7 +148,7 @@ listener can create a `User` account.
 resource grants, and the production listener is bound to localhost. For an internet-facing
 deployment this would need the same configuration flag as 7.1.
 
-### 7.3 Basic authentication over plain HTTP
+### 6.3 Basic authentication over plain HTTP
 **What it is.** The API uses HTTP Basic authentication on every endpoint except `/health` and
 `/api/auth/*`. Basic auth transmits credentials base64-encoded, which is encoding, not encryption,
 and both deployed environments serve plain HTTP.
@@ -306,11 +160,12 @@ deployment beyond this machine must terminate TLS in front of the application �
 handling HTTPS is the standard placement, since the container itself holds no certificate and
 should not.
 
-### 7.4 Positive findings worth recording
+### 6.4 Positive findings worth recording
 Not everything found by review was a problem, and the controls that *are* present are part of the
 security posture:
 
-- The container runs as **non-root** `appuser` (UID 5678, system account, no home, no shell login).
+- The container runs as **non-root** (UID 1654, the chiselled image's built-in `app` user) in an
+  image with **no shell and no package manager**, so even arbitrary code execution has no tools to work with.
 - **No secrets in the image** — confirmed independently by Trivy's secret scanner (0 findings).
 - Passwords are stored as hashes via `MultiPasswordHashService`, with the algorithm recorded per
   credential so hashes can be migrated without a mass reset.
@@ -322,48 +177,35 @@ security posture:
 
 ---
 
-## 8. Accepted risk register
+## 7. Risk register
 
-| # | Finding | Severity | Disposition | Re-evaluate when |
+| # | Finding | Severity | Decision | Review |
 |---|---|---|---|---|
-| R1 | 4 CRITICAL CVEs in `zlib1g` / `perl-base`, all unfixed | CRITICAL | Accepted — not reachable; no patch exists | Debian publishes a fix; the gate will then fail the build automatically |
-| R2 | 53 HIGH CVEs in unreachable Debian base packages | HIGH | Accepted — not reachable; no patch exists | Base image rebase (see M1) |
-| R3 | 10 HIGH CVEs in `curl` / `libcurl4`, introduced by our Dockerfile | HIGH | Accepted — invoked only by the health probe against a fixed local URL | Immediately on completing M1 |
-| R4 | 121 MEDIUM + 121 LOW in base packages | MEDIUM/LOW | Accepted — reported and archived, below the enforcement threshold | Base image rebase |
-| R5 | First-registration Admin bootstrap race | MEDIUM | Documented — window closed by localhost-only binding | Before any non-localhost deployment |
-| R6 | Basic auth over plain HTTP | MEDIUM | Mitigated — loopback-only, no interceptable segment | Before any non-localhost deployment |
+| R1 | 4 CRITICAL + 61 HIGH in unused Debian base packages | CRITICAL/HIGH | **Remediated** — packages removed by the chiselled rebase (§2) | Closed |
+| R2 | 10 HIGH in `curl` / `libcurl4`, added by our Dockerfile | HIGH | **Remediated** — curl removed; the app probes its own health (§2) | Closed |
+| R3 | CVE-2026-84782, `openssl`, DTLS | HIGH | **Excepted** — not reachable; fix arrives through `--pull` (§4.1) | **15 Oct 2026**, enforced by expiry |
+| R4 | 9 MEDIUM + 11 LOW in chiselled base libraries | MEDIUM/LOW | Reported every build, not gated (§5) | With R3 |
+| R5 | First-registration Admin bootstrap race | MEDIUM | Documented — window closed by localhost-only binding (§6.1) | Before any non-localhost deployment |
+| R6 | Basic auth over plain HTTP | MEDIUM | Mitigated — loopback only (§6.3) | Before any non-localhost deployment |
 
-**Standing rule:** none of these acceptances is permanent. Every one is re-tested on every pipeline
-run, because the Security stage scans the freshly built image rather than consulting a stored
-allow-list. The acceptance is of a *current, evidenced* state, not a suppression.
+## 8. Remediation roadmap
 
----
+| # | Action | Status |
+|---|---|---|
+| M1 | Rebase production onto `aspnet:8.0-noble-chiseled-extra`; replace the curl HEALTHCHECK | **Done, 1 Oct 2026** |
+| M2 | Seed the admin account at deploy time from a Jenkins credential; delete the bootstrap branch | Open — needs integration-fixture changes |
+| M3 | Terminate TLS at a reverse proxy in front of both environments | Open — only meaningful beyond localhost |
+| M4 | `trivy config` on the Dockerfile | **Done** — and now gating (rule 5) |
+| M5 | Tighten the gate from CRITICAL to HIGH once M1 lands | **Done, 1 Oct 2026** — and without `--ignore-unfixed` |
 
-## 9. Remediation roadmap
-
-| # | Action | Removes | Effort | Blocked by |
-|---|---|---|---|---|
-| M1 | Rebase the production stage onto `aspnet:8.0-noble-chiseled` and replace the curl HEALTHCHECK with a self-contained probe binary | The large majority of all 310 findings, including all 4 CRITICALs and R3 | ~2 h + a full verification run | Needs its own change and pipeline run; the HEALTHCHECK is load-bearing for `depends_on` in all three compose files |
-| M2 | Seed the admin account at deploy time from a Jenkins credential; delete the bootstrap branch | R5 | ~1 h | Integration test fixture registers users to obtain credentials |
-| M3 | Terminate TLS at a reverse proxy in front of both environments | R6 | ~1 h | Only meaningful once deployed beyond localhost |
-| M4 | Add `trivy config` to lint the Dockerfile and compose files for misconfiguration alongside the vulnerability scan | Nothing today; catches future misconfiguration | ~20 min | None — the cheapest remaining hardening |
-| M5 | Tighten the gate from `CRITICAL` to `HIGH` once M1 lands and the HIGH count is near zero | — | ~5 min | M1 |
-
-M1 and M5 are paired on purpose. The reason the gate is set at CRITICAL today is that 63 unfixable
-HIGH findings make a HIGH gate unenforceable. Remove the packages carrying them and the constraint
-disappears, at which point the gate can be tightened and *stay* tightened. That is the difference
-between loosening a control to get a green build and re-earning the right to enforce a stricter
-one.
-
----
-
-## 10. Evidence
+## 9. Evidence
 
 Attached to every build in Jenkins:
 
-- `security/trivy-full-report.txt` — the complete human-readable table, all severities
-- `security/trivy-report.json` — the machine-readable record this document was written from
-- Console output of the blocking gate, showing its exit status
-
-The scan runs against `myapp:${IMAGE_TAG}` — the image built in stage 1 — and not against a
-rebuild. The artefact scanned here is byte-for-byte the artefact running in production.
+- `security/trivy-full-report.txt` — every finding, all severities, exceptions not applied
+- `security/trivy-report.json` — the machine-readable record
+- `security/trivy-config-report.txt` — Dockerfile misconfiguration scan
+- `security/trivy-summary.json` — counts, excepted vs gating; also spliced into `build-manifest.json`
+- `.trivyignore.yaml` — the exceptions in force for that build
+- Console: the SECURITY EXCEPTIONS table (each exception, review date, days left) and the
+  SECURITY SUMMARY, then the two gate results

@@ -166,6 +166,26 @@ pipeline {
         STAGING_PORT    = '8090'
         PROD_PORT       = '8091'
         TEST_PORT       = '8092'
+        // COVERAGE CHANGE - host port for the instrumented coverage run in stage 2.
+        COVERAGE_PORT   = '8093'
+
+        // COVERAGE CHANGE - coverage gate thresholds, in percent.
+        // Measured baseline when introduced (1 Oct 2026, unit + integration merged):
+        // line 7.8, branch 6.5, Maps context 69.9. The suite tests the Maps bounded
+        // context end to end, plus auth and health on the way, and nothing else yet.
+        //   - The whole-codebase floors sit just under the baseline. They are a
+        //     ratchet: they stop coverage going backwards, and are raised as tests
+        //     are added. A high number here would only be met by deleting code.
+        //   - The Maps threshold is the real bar: the context the suite is
+        //     responsible for must stay at 60% line coverage or better.
+        COVERAGE_MIN_LINE   = '7.5'
+        COVERAGE_MIN_BRANCH = '6.0'
+        COVERAGE_MIN_MAPS   = '60'
+
+        // SECURITY POLICY CHANGE - the longest an exception in .trivyignore.yaml may
+        // run before its review date. An exception is a decision with a deadline,
+        // not a permanent suppression.
+        MAX_EXCEPTION_DAYS  = '30'
 
         // Where we remember the last known-good tag per environment, for rollback.
         // CONFIG ROLLBACK CHANGE - also holds the matching known-good env file per
@@ -214,7 +234,9 @@ pipeline {
 
                     REM :latest is kept because the compose files fall back to it when
                     REM IMAGE_TAG is unset, which is how a stack is brought up by hand.
-                    docker build --target production ^
+                    REM SECURITY POLICY CHANGE - --pull fetches the newest base image
+                    REM every build, so upstream OS patches arrive without a code change.
+                    docker build --pull --target production ^
                         -t %IMAGE_NAME%:%IMAGE_TAG% ^
                         -t %IMAGE_NAME%:latest ^
                         .
@@ -261,7 +283,12 @@ pipeline {
         // =====================================================================
         stage('Test') {
             steps {
-                bat 'if not exist "%WORKSPACE%\\testresults" mkdir "%WORKSPACE%\\testresults"'
+                // COVERAGE CHANGE - emptied first: coverage files land in per-run GUID
+                // folders, and a stale one from an earlier build would be merged in.
+                bat '''
+                    if exist "%WORKSPACE%\\testresults" rmdir /s /q "%WORKSPACE%\\testresults"
+                    mkdir "%WORKSPACE%\\testresults"
+                '''
 
                 echo '--- Unit tests (inside the test image) ---'
                 bat """
@@ -270,6 +297,7 @@ pipeline {
                         %IMAGE_NAME%:%TEST_IMAGE_TAG% ^
                         dotnet test --filter "Category!=Integration" ^
                             --logger "junit;LogFilePath=/testresults/unit-results.xml" ^
+                            --collect:"XPlat Code Coverage" ^
                             --results-directory /testresults
                 """
 
@@ -332,10 +360,150 @@ pipeline {
                     # Recorded for the build manifest written in stage 7.
                     Set-Content -Path "$env:WORKSPACE\\testresults\\test-count.txt" -Value $total -Encoding ascii
                 '''
+
+                // =============================================================
+                // COVERAGE CHANGE - measured coverage, published and gated.
+                //
+                // Unit coverage comes from coverlet above. Integration coverage
+                // needs more: the integration tests call the API in another
+                // container, so an in-process collector sees none of the server
+                // code. This run starts the same build of the API from the test
+                // image under dotnet-coverage, replays the integration suite
+                // against it, and writes Cobertura when the session shuts down.
+                //
+                // The pass/fail verdict on the integration tests is the run above,
+                // against the deployable image. This run only measures, so its
+                // results are not published to JUnit a second time.
+                // =============================================================
+                echo '--- Coverage run: instrumented API under the integration suite ---'
+                bat """
+                    docker rm -f robot-cov-app 2>nul
+                    docker run -d --name robot-cov-app ^
+                        --network robot-test-net ^
+                        -p %COVERAGE_PORT%:8080 ^
+                        -v "%WORKSPACE%\\testresults:/testresults" ^
+                        -w /src/bin/Release/net8.0 ^
+                        -e ASPNETCORE_ENVIRONMENT=Staging ^
+                        -e ASPNETCORE_HTTP_PORTS=8080 ^
+                        -e DB_HOST=db ^
+                        -e DB_PORT=5432 ^
+                        -e DB_NAME=robotcontroller_test ^
+                        -e DB_USER=robot_test ^
+                        -e DB_PASSWORD=throwaway_test_password ^
+                        -e Persistence__Provider=ADO ^
+                        %IMAGE_NAME%:%TEST_IMAGE_TAG% ^
+                        dotnet-coverage collect --session-id cov -f cobertura ^
+                            -o /testresults/coverage-raw/integration.cobertura.xml ^
+                            "dotnet RobotControllerApi.dll"
+                """
+
+                powershell '''
+                    $url = "http://localhost:$env:COVERAGE_PORT/health"
+                    $ok = $false
+                    for ($i = 0; $i -lt 30; $i++) {
+                        try {
+                            $r = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5
+                            if ($r.StatusCode -eq 200) { $ok = $true; break }
+                        } catch { }
+                        Start-Sleep -Seconds 5
+                    }
+                    if (-not $ok) { Write-Error "Instrumented API never became healthy at $url"; exit 1 }
+                    Write-Host "Instrumented API healthy after $($i * 5)s"
+                '''
+
+                bat """
+                    docker run --rm ^
+                        --network robot-test-net ^
+                        -e API_BASE_URL=http://robot-cov-app:8080 ^
+                        %IMAGE_NAME%:%TEST_IMAGE_TAG% ^
+                        dotnet test -c Release --no-build --filter "Category=Integration"
+                """
+
+                // Shutting the session down makes dotnet-coverage stop the API and
+                // write its report; docker wait returns once that has finished.
+                // Bounded, so a session that never shuts down cannot hang the build.
+                timeout(time: 3, unit: 'MINUTES') {
+                    bat """
+                        docker exec robot-cov-app dotnet-coverage shutdown cov
+                        docker wait robot-cov-app
+                    """
+                }
+
+                // Merges unit + integration into one report: HTML for people, JSON
+                // for the gate below, Cobertura for anything else that wants it.
+                // Filtered to the application assembly - framework and NuGet code
+                // the API loaded is not ours to cover.
+                bat """
+                    docker run --rm ^
+                        -v "%WORKSPACE%\\testresults:/testresults" ^
+                        %IMAGE_NAME%:%TEST_IMAGE_TAG% ^
+                        reportgenerator ^
+                            "-reports:/testresults/*/coverage.cobertura.xml;/testresults/coverage-raw/integration.cobertura.xml" ^
+                            -targetdir:/testresults/coverage ^
+                            "-reporttypes:Html;TextSummary;JsonSummary;Cobertura" ^
+                            "-assemblyfilters:+RobotControllerApi" ^
+                            -verbosity:Warning
+                """
+
+                bat 'type "%WORKSPACE%\\testresults\\coverage\\Summary.txt"'
+
+                // The gate. Three thresholds, set in the environment block with the
+                // reasoning for each: whole-codebase line and branch floors (a
+                // ratchet against regression), and the Maps context the suite is
+                // responsible for.
+                powershell '''
+                    $j = Get-Content "$env:WORKSPACE\\testresults\\coverage\\Summary.json" -Raw | ConvertFrom-Json
+                    $line   = [double]$j.summary.linecoverage
+                    $branch = [double]$j.summary.branchcoverage
+
+                    $maps = @($j.coverage.assemblies | ForEach-Object { $_.classesinassembly } |
+                              Where-Object { $_.name -like "RobotControllerApi.BoundedContexts.Maps.*" })
+                    $mapsCovered   = ($maps | Measure-Object coveredlines   -Sum).Sum
+                    $mapsCoverable = ($maps | Measure-Object coverablelines -Sum).Sum
+                    $mapsLine = if ($mapsCoverable) { [math]::Round(100 * $mapsCovered / $mapsCoverable, 1) } else { 0 }
+
+                    $checks = @(
+                        @{ name = "Line coverage, whole codebase";   actual = $line;     min = [double]$env:COVERAGE_MIN_LINE },
+                        @{ name = "Branch coverage, whole codebase"; actual = $branch;   min = [double]$env:COVERAGE_MIN_BRANCH },
+                        @{ name = "Line coverage, Maps context";     actual = $mapsLine; min = [double]$env:COVERAGE_MIN_MAPS }
+                    )
+
+                    Write-Host ""
+                    Write-Host "================ COVERAGE GATE ================"
+                    $failed = 0
+                    foreach ($c in $checks) {
+                        if ($c.actual -ge $c.min) { $verdict = "PASS" } else { $verdict = "FAIL"; $failed++ }
+                        Write-Host ("  {0,-34} {1,6:N1}%   min {2,5:N1}%   {3}" -f $c.name, $c.actual, $c.min, $verdict)
+                    }
+                    Write-Host "================================================"
+                    Write-Host ""
+
+                    # Recorded for the build manifest written in stage 7.
+                    [ordered]@{
+                        lineCoverage     = $line
+                        branchCoverage   = $branch
+                        mapsLineCoverage = $mapsLine
+                        thresholds = [ordered]@{
+                            line   = [double]$env:COVERAGE_MIN_LINE
+                            branch = [double]$env:COVERAGE_MIN_BRANCH
+                            maps   = [double]$env:COVERAGE_MIN_MAPS
+                        }
+                    } | ConvertTo-Json | Set-Content "$env:WORKSPACE\\testresults\\coverage-summary.json" -Encoding ascii
+
+                    if ($failed -gt 0) {
+                        Write-Error "Coverage gate FAILED: $failed threshold(s) not met. Add tests - do not lower the threshold to pass."
+                        exit 1
+                    }
+                '''
             }
             post {
                 always {
                     junit allowEmptyResults: false, testResults: 'testresults/*.xml'
+                    // COVERAGE CHANGE - the HTML report opens from the build's
+                    // artifacts: testresults/coverage/index.html.
+                    archiveArtifacts artifacts: 'testresults/coverage/**, testresults/coverage-summary.json',
+                                     allowEmptyArchive: true
+                    bat 'docker rm -f robot-cov-app 2>nul || exit /b 0'
                     bat 'docker compose -f docker-compose.test.yml down -v || exit /b 0'
                 }
                 success { echo 'Tests PASSED - unit and integration, gated' }
@@ -437,20 +605,84 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
 
         // =====================================================================
         // STAGE 4 - SECURITY
-        // Trivy scans the built image: OS packages, NuGet dependencies and secrets.
-        // Separate concern from stage 3's maintainability analysis.
+        // Trivy scans the built image (OS packages, NuGet dependencies, secrets)
+        // and the repo's Dockerfile for misconfiguration. Separate concern from
+        // stage 3's maintainability analysis.
         //
-        // Gate: fails the stage on CRITICAL vulnerabilities that have a fix available
-        // (--ignore-unfixed). These must be remediated to pass; documentation does not
-        // override the gate. Unfixable CRITICALs are reported and archived but do not
-        // fail the build - their disposition is recorded in security-findings.md.
+        // SECURITY POLICY CHANGE - the policy, in full (security-findings.md §3):
+        //   1. Any HIGH or CRITICAL vulnerability or secret fails the stage, fixable
+        //      or not. There is no --ignore-unfixed: an unavailable fix does not
+        //      remove the risk.
+        //   2. The only way past rule 1 is an explicit exception in .trivyignore.yaml
+        //      naming the finding, the decision, the compensating control and a
+        //      review date. On that date the exception expires, the finding counts
+        //      again, and the build fails until someone re-decides.
+        //   3. No exception may run longer than MAX_EXCEPTION_DAYS, and one with no
+        //      statement or no review date fails the stage.
+        //   4. Any HIGH or CRITICAL Dockerfile misconfiguration fails the stage,
+        //      under the same exception rules.
+        //   5. MEDIUM and LOW are reported and archived on every build, not gated.
         // =====================================================================
         stage('Security') {
             steps {
                 bat 'if not exist "%WORKSPACE%\\security" mkdir "%WORKSPACE%\\security"'
 
-                // Report-only pass: `|| exit /b 0` keeps the scan output available even
-                // when the gate below fails the stage.
+                // Policy check first. A malformed or open-ended exception would
+                // quietly weaken the gate, so the file is validated before Trivy
+                // is allowed to use it.
+                powershell '''
+                    $path = "$env:WORKSPACE\\.trivyignore.yaml"
+                    if (-not (Test-Path $path)) {
+                        Write-Host "No exceptions file - every HIGH and CRITICAL finding gates."
+                        exit 0
+                    }
+
+                    $entries = @()
+                    $cur = $null
+                    foreach ($l in Get-Content $path) {
+                        if ($l -match '^\\s*-\\s*id:\\s*(\\S+)') {
+                            if ($cur) { $entries += $cur }
+                            $cur = [ordered]@{ id = $matches[1]; expires = $null; statement = $null }
+                        }
+                        elseif ($cur -and $l -match '^\\s*expired_at:\\s*(\\S+)') { $cur.expires = $matches[1] }
+                        elseif ($cur -and $l -match '^\\s*statement:\\s*(.+)$')    { $cur.statement = $matches[1].Trim() }
+                    }
+                    if ($cur) { $entries += $cur }
+
+                    $today = (Get-Date).Date
+                    $limit = $today.AddDays([int]$env:MAX_EXCEPTION_DAYS)
+                    $problems = 0
+
+                    Write-Host ""
+                    Write-Host "================ SECURITY EXCEPTIONS ================"
+                    Write-Host ("  {0,-18} {1,-12} {2,10}   {3}" -f "Finding", "Review by", "Days left", "Status")
+                    foreach ($e in $entries) {
+                        $status = "active"
+                        $days = ""
+                        if (-not $e.statement) { $status = "INVALID - no statement"; $problems++ }
+                        if (-not $e.expires) {
+                            $status = "INVALID - no review date"; $problems++
+                        } else {
+                            $d = [datetime]::ParseExact($e.expires.Substring(0, 10), "yyyy-MM-dd", $null)
+                            $days = ($d - $today).Days
+                            if ($d -lt $today)     { $status = "EXPIRED - finding gates again" }
+                            elseif ($d -gt $limit) { $status = "INVALID - review more than $($env:MAX_EXCEPTION_DAYS) days away"; $problems++ }
+                        }
+                        Write-Host ("  {0,-18} {1,-12} {2,10}   {3}" -f $e.id, $e.expires, $days, $status)
+                    }
+                    if ($entries.Count -eq 0) { Write-Host "  (none)" }
+                    Write-Host "====================================================="
+                    Write-Host ""
+
+                    if ($problems -gt 0) {
+                        Write-Error "$problems exception(s) break the policy. Every exception needs a statement and a review date within $($env:MAX_EXCEPTION_DAYS) days."
+                        exit 1
+                    }
+                '''
+
+                // Report-only passes, deliberately WITHOUT the exceptions file: the
+                // archived record shows everything Trivy found, excepted or not.
+                // `|| exit /b 0` keeps the reports available when the gate fails.
                 bat """
                     docker run --rm ^
                         -v //var/run/docker.sock:/var/run/docker.sock ^
@@ -476,28 +708,30 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
 
                 bat 'type "%WORKSPACE%\\security\\trivy-full-report.txt"'
 
-                // Config scan: catches Dockerfile/compose misconfiguration (running as
-                // root, missing USER, writable root filesystem) that an image scan does
-                // not look for. Report-only - no baseline has been triaged yet, so
-                // gating on it would fail builds on untriaged findings.
+                // Config scan: Dockerfile misconfiguration (running as root, missing
+                // USER, missing HEALTHCHECK) that an image scan does not look for.
+                // --skip-check-update uses the checks bundled with the pinned Trivy
+                // version, so the result cannot move between builds because the
+                // check bundle changed underneath it.
                 bat """
                     docker run --rm ^
                         -v "%WORKSPACE%:/project" ^
                         -v "%WORKSPACE%\\security:/out" ^
-                        %TRIVY_IMAGE% config /project ^
-                        --severity HIGH,CRITICAL ^
+                        %TRIVY_IMAGE% config ^
+                        --skip-check-update ^
+                        --severity LOW,MEDIUM,HIGH,CRITICAL ^
                         --format table ^
-                        --output /out/trivy-config-report.txt || exit /b 0
+                        --output /out/trivy-config-report.txt ^
+                        /project || exit /b 0
                 """
                 bat 'type "%WORKSPACE%\\security\\trivy-config-report.txt" 2>nul || echo (no misconfiguration findings)'
 
-                // Summarises the JSON report by severity, splitting fixable from
-                // unfixable. Only fixable CRITICALs are actionable, and those are what
-                // the gate below blocks on. Also writes trivy-summary.json, which stage 7
-                // splices into the build manifest.
+                // Summary against the policy: how many HIGH/CRITICAL findings exist,
+                // how many are covered by an active exception, and how many would
+                // gate. Also writes trivy-summary.json, which stage 7 splices into
+                // the build manifest.
                 powershell '''
-                    $path = "$env:WORKSPACE\\security\\trivy-report.json"
-                    $j = Get-Content $path -Raw | ConvertFrom-Json
+                    $j = Get-Content "$env:WORKSPACE\\security\\trivy-report.json" -Raw | ConvertFrom-Json
 
                     $vulns = @()
                     $secretCount = 0
@@ -506,74 +740,103 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                         if ($r.Secrets)         { $secretCount += $r.Secrets.Count }
                     }
 
+                    # Active exceptions: listed in the file and not yet past review.
+                    $active = @()
+                    $path = "$env:WORKSPACE\\.trivyignore.yaml"
+                    if (Test-Path $path) {
+                        $id = $null
+                        foreach ($l in Get-Content $path) {
+                            if ($l -match '^\\s*-\\s*id:\\s*(\\S+)') { $id = $matches[1] }
+                            elseif ($id -and $l -match '^\\s*expired_at:\\s*(\\S+)') {
+                                if ([datetime]::ParseExact($matches[1].Substring(0, 10), "yyyy-MM-dd", $null) -ge (Get-Date).Date) { $active += $id }
+                                $id = $null
+                            }
+                        }
+                    }
+
+                    $highCrit = @($vulns | Where-Object { $_.Severity -in @("HIGH", "CRITICAL") })
+                    $excepted = @($highCrit | Where-Object { $_.VulnerabilityID -in $active })
+                    $gating   = @($highCrit | Where-Object { $_.VulnerabilityID -notin $active })
+
+                    $appVulns = 0
+                    foreach ($r in $j.Results) {
+                        if ($r.Class -eq "lang-pkgs" -and $r.Vulnerabilities) { $appVulns += $r.Vulnerabilities.Count }
+                    }
+
                     Write-Host ""
                     Write-Host "================ SECURITY SUMMARY ================"
                     Write-Host ("  Image scanned : {0}:{1}" -f $env:IMAGE_NAME, $env:IMAGE_TAG)
                     Write-Host ("  Total findings: {0}" -f $vulns.Count)
                     Write-Host ""
                     Write-Host "  Severity      Total   Fixable"
-                    foreach ($sev in @("CRITICAL","HIGH","MEDIUM","LOW","UNKNOWN")) {
+                    foreach ($sev in @("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN")) {
                         $s = @($vulns | Where-Object { $_.Severity -eq $sev })
-                        $f = @($s      | Where-Object { $_.FixedVersion })
-                        if ($s.Count -gt 0) {
-                            Write-Host ("  {0,-12} {1,6} {2,9}" -f $sev, $s.Count, $f.Count)
-                        }
+                        $f = @($s     | Where-Object { $_.FixedVersion })
+                        if ($s.Count -gt 0) { Write-Host ("  {0,-12} {1,6} {2,9}" -f $sev, $s.Count, $f.Count) }
                     }
-
-                    $appVulns = 0
-                    foreach ($r in $j.Results) {
-                        if ($r.Class -eq "lang-pkgs" -and $r.Vulnerabilities) {
-                            $appVulns += $r.Vulnerabilities.Count
-                        }
-                    }
-                    $fixableCritical = @($vulns | Where-Object { $_.Severity -eq "CRITICAL" -and $_.FixedVersion }).Count
-
                     Write-Host ""
-                    Write-Host ("  Application dependency findings : {0}" -f $appVulns)
-                    Write-Host ("  Secrets embedded in the image   : {0}" -f $secretCount)
-                    Write-Host ("  CRITICAL with a fix available   : {0}   <- this is what the gate blocks on" -f $fixableCritical)
+                    Write-Host ("  Application dependency findings  : {0}" -f $appVulns)
+                    Write-Host ("  Secrets embedded in the image    : {0}" -f $secretCount)
+                    Write-Host ("  HIGH/CRITICAL, any fix status    : {0}" -f $highCrit.Count)
+                    Write-Host ("    covered by an active exception : {0}" -f $excepted.Count)
+                    Write-Host ("    not covered - these gate       : {0}" -f $gating.Count)
+                    foreach ($g in $gating) {
+                        Write-Host ("      {0} {1} {2} (fix: {3})" -f $g.Severity, $g.VulnerabilityID, $g.PkgName, $(if ($g.FixedVersion) { $g.FixedVersion } else { "none" }))
+                    }
                     Write-Host "=================================================="
                     Write-Host ""
 
-                    $summary = [ordered]@{
-                        image              = "$($env:IMAGE_NAME):$($env:IMAGE_TAG)"
-                        scannedAtUtc       = (Get-Date).ToUniversalTime().ToString("o")
-                        totalFindings      = $vulns.Count
-                        critical           = @($vulns | Where-Object { $_.Severity -eq "CRITICAL" }).Count
-                        high               = @($vulns | Where-Object { $_.Severity -eq "HIGH" }).Count
-                        medium             = @($vulns | Where-Object { $_.Severity -eq "MEDIUM" }).Count
-                        low                = @($vulns | Where-Object { $_.Severity -eq "LOW" }).Count
-                        fixableCritical    = $fixableCritical
-                        fixableAnySeverity = @($vulns | Where-Object { $_.FixedVersion }).Count
+                    [ordered]@{
+                        image                 = "$($env:IMAGE_NAME):$($env:IMAGE_TAG)"
+                        scannedAtUtc          = (Get-Date).ToUniversalTime().ToString("o")
+                        policy                = "HIGH and CRITICAL gate regardless of fix status; exceptions expire"
+                        totalFindings         = $vulns.Count
+                        critical              = @($vulns | Where-Object { $_.Severity -eq "CRITICAL" }).Count
+                        high                  = @($vulns | Where-Object { $_.Severity -eq "HIGH" }).Count
+                        medium                = @($vulns | Where-Object { $_.Severity -eq "MEDIUM" }).Count
+                        low                   = @($vulns | Where-Object { $_.Severity -eq "LOW" }).Count
+                        highCriticalExcepted  = $excepted.Count
+                        highCriticalGating    = $gating.Count
                         appDependencyFindings = $appVulns
-                        secretsFound       = $secretCount
-                    }
-                    $summary | ConvertTo-Json | Set-Content "$env:WORKSPACE\\security\\trivy-summary.json" -Encoding ascii
+                        secretsFound          = $secretCount
+                    } | ConvertTo-Json | Set-Content "$env:WORKSPACE\\security\\trivy-summary.json" -Encoding ascii
                 '''
 
-                // Gate: exits 1 on CRITICAL vulnerabilities that have a fix available.
-                // --ignore-unfixed means unfixable CRITICALs do not fail the stage.
+                // The gates. Both use the exceptions file; both fail the stage.
+                // `|| exit /b 1` on the first, because cmd reports only the last
+                // command's exit code and the image gate would otherwise be lost.
                 bat """
                     docker run --rm ^
                         -v //var/run/docker.sock:/var/run/docker.sock ^
+                        -v "%WORKSPACE%:/project" ^
                         %TRIVY_IMAGE% image ^
-                        --scanners vuln ^
-                        --severity CRITICAL ^
+                        --scanners vuln,secret ^
+                        --severity HIGH,CRITICAL ^
+                        --ignorefile /project/.trivyignore.yaml ^
                         --exit-code 1 ^
-                        --ignore-unfixed ^
-                        %IMAGE_NAME%:%IMAGE_TAG%
+                        %IMAGE_NAME%:%IMAGE_TAG% || exit /b 1
+
+                    docker run --rm ^
+                        -v "%WORKSPACE%:/project" ^
+                        %TRIVY_IMAGE% config ^
+                        --skip-check-update ^
+                        --severity HIGH,CRITICAL ^
+                        --ignorefile /project/.trivyignore.yaml ^
+                        --exit-code 1 ^
+                        /project
                 """
 
-                // security-findings.md is documentation, not a pipeline input. Archived
-                // alongside the scan output when present; its absence is not a failure.
-                archiveArtifacts artifacts: 'security/trivy-full-report.txt, security/trivy-report.json, security/trivy-summary.json, security/trivy-config-report.txt, security-findings.md',
-                                 allowEmptyArchive: true
             }
             post {
-                always  { echo 'Scan reports archived. Dispositions are recorded in security-findings.md.' }
-                success { echo 'Security gate PASSED - no CRITICAL vulnerability with an available fix' }
+                // Archived in post so the evidence survives a failed gate.
+                always  {
+                    archiveArtifacts artifacts: 'security/trivy-full-report.txt, security/trivy-report.json, security/trivy-summary.json, security/trivy-config-report.txt, security-findings.md, .trivyignore.yaml',
+                                     allowEmptyArchive: true
+                    echo 'Scan reports archived. Every exception and its review date is in .trivyignore.yaml; the reasoning is in security-findings.md.'
+                }
+                success { echo 'Security gate PASSED - no HIGH or CRITICAL finding without a current, reviewed exception' }
                 failure {
-                    echo 'CRITICAL vulnerability with an available fix detected. Remediate the vulnerable dependency or image component before re-running - documenting it does not satisfy this gate. Record relevant analysis in security-findings.md if needed.'
+                    echo 'Security gate FAILED. Either remediate the finding (upgrade the package or base image), or record an explicit decision in .trivyignore.yaml with a statement, compensating control and review date. An expired exception means its review is due.'
                 }
             }
         }
@@ -1035,6 +1298,9 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
                         ? readFile('testresults/test-count.txt').trim() : 'unknown'
                     def security = fileExists('security/trivy-summary.json')
                         ? readFile('security/trivy-summary.json').trim() : '{}'
+                    // COVERAGE CHANGE - written by stage 2's coverage gate.
+                    def coverage = fileExists('testresults/coverage-summary.json')
+                        ? readFile('testresults/coverage-summary.json').trim() : '{}'
 
                     def manifest = """{
     "build": {
@@ -1055,6 +1321,7 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
     },
     "verification": {
         "testsExecuted": "${testCount}",
+        "coverage": ${coverage},
         "qualityGate": "passed",
         "security": ${security}
     },
@@ -1107,6 +1374,11 @@ dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
             // rollback target recorded in DEPLOY_STATE. There is no registry to pull it
             // back from, so rollback is best-effort rather than guaranteed.
             bat 'docker image prune -f --filter "until=168h" || exit /b 0'
+
+            // The test image (~6 GB: SDK, sources, test tooling) is only used by
+            // stage 2 and is never a rollback target, so it goes at the end of every
+            // build. Left in place, one per build filled the disk at build #25.
+            bat 'docker rmi %IMAGE_NAME%:%TEST_IMAGE_TAG% || exit /b 0'
         }
     }
 }

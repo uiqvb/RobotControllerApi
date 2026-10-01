@@ -1,0 +1,21 @@
+# Security exceptions - RobotControllerApi
+#
+# Every HIGH or CRITICAL finding fails stage 4 of the pipeline unless it is listed
+# here. Each entry is a decision, not a suppression, and must have:
+#   id          the CVE or Trivy check ID
+#   statement   the decision, why, the compensating control, and the owner
+#   expired_at  the review date - at most 30 days out (MAX_EXCEPTION_DAYS)
+#
+# On the review date the exception stops applying, the finding counts again and
+# the build fails until someone re-decides: remediate, or renew with fresh
+# reasoning. The full analysis for each entry is in security-findings.md §4.
+#
+# The pipeline validates this file before Trivy reads it. An entry with no
+# statement, no review date, or a review date too far out fails the stage.
+
+vulnerabilities:
+  - id: CVE-2026-84782
+    statement: "openssl / libssl3t64 3.0.13-0ubuntu3.15, HIGH, DTLS handshake information disclosure. Fixed in Ubuntu 3.0.13-0ubuntu3.16 but not yet in the mcr.microsoft.com/dotnet/aspnet:8.0-noble-chiseled-extra base, which cannot be patched in place (no package manager). Not reachable: the API serves plain HTTP over TCP behind loopback and never uses DTLS (TLS over UDP). Compensating control: the build pulls the base image on every run (docker build --pull), so the fix lands automatically when Microsoft republishes. Owner: Manit Khera. See security-findings.md 4.1."
+    expired_at: 2026-10-15
+
+misconfigurations: []

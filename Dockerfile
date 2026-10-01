@@ -36,6 +36,14 @@ RUN dotnet restore tests/RobotControllerApi.Tests/RobotControllerApi.Tests.cspro
 # commands work verbatim:
 #   docker run --rm myapp:test-1.0.1 dotnet test --filter "Category!=Integration"
 #   docker run --rm myapp:test-1.0.1 dotnet test --filter "Category=Integration"
+# Coverage tooling, pinned. Stage 2 of the pipeline uses both:
+#   dotnet-coverage  - instruments the running API while the integration suite
+#                      calls it, which coverlet cannot do across a process boundary
+#   reportgenerator  - merges unit + integration coverage into one report
+RUN dotnet tool install --global dotnet-coverage --version 18.11.2 \
+    && dotnet tool install --global dotnet-reportgenerator-globaltool --version 5.5.11
+ENV PATH="${PATH}:/root/.dotnet/tools"
+
 WORKDIR /src/tests/RobotControllerApi.Tests
 
 ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 \
@@ -52,21 +60,23 @@ RUN dotnet publish RobotControllerApi.csproj -c Release -o /app/publish --no-bui
 
 # ---------------------------------------------------------------------------
 # Stage 4: production - runtime only. No SDK, no sources, no test tooling.
+#
+# Chiselled Ubuntu (security remediation M1 in security-findings.md). The image
+# contains the .NET runtime and its native dependencies and nothing else: no
+# shell, no package manager, no curl, perl, util-linux or ncurses. The Debian
+# base this replaced carried 4 CRITICAL and 63 HIGH findings, all in packages
+# the app never used. Removing the packages removes the findings, rather than
+# accepting them. "-extra" adds ICU and tzdata so culture and time-zone
+# behaviour is unchanged from the Debian image.
 # ---------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS production
-
-# curl is here solely for HEALTHCHECK; the runtime image ships without one.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Run as an unprivileged user. Created explicitly rather than relying on the
-# base image's built-in app user, so the UID is stable and visible here.
-RUN groupadd --system --gid 5678 appgroup \
-    && useradd --system --uid 5678 --gid appgroup --no-create-home appuser
+FROM mcr.microsoft.com/dotnet/aspnet:8.0-noble-chiseled-extra AS production
 
 WORKDIR /app
-COPY --from=publish --chown=appuser:appgroup /app/publish .
+
+# The image's built-in non-root user, UID 1654 ($APP_UID in the base image).
+# There is no shell to run useradd with, so the base image's user is used. It
+# has no login shell and no home directory contents.
+COPY --from=publish --chown=1654:1654 /app/publish .
 
 # Configuration only - no credentials, no connection string, no environment
 # identity. Everything environment-specific arrives at `docker run` time, which
@@ -77,11 +87,14 @@ ENV ASPNETCORE_HTTP_PORTS=8080 \
 
 EXPOSE 8080
 
-USER appuser
+USER 1654
 
-# Shell form on purpose: the port has to expand at run time, so overriding
-# ASPNETCORE_HTTP_PORTS moves the probe with the listener.
+# Exec form: there is no shell in this image. The app runs itself in probe mode
+# (see --healthcheck at the top of Program.cs), which reads ASPNETCORE_HTTP_PORTS
+# so overriding the port still moves the probe with the listener. The compose
+# files' depends_on: service_healthy and the pipeline's deploy verification both
+# rely on this status.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
-    CMD curl -fsS "http://localhost:${ASPNETCORE_HTTP_PORTS}/health" || exit 1
+    CMD ["dotnet", "/app/RobotControllerApi.dll", "--healthcheck"]
 
 ENTRYPOINT ["dotnet", "RobotControllerApi.dll"]
