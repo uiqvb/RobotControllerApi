@@ -288,11 +288,15 @@ pipeline {
                 '''
 
                 echo '--- Unit tests (inside the test image) ---'
+                // COVERAGE CHANGE - -c Release --no-build runs the binaries already
+                // compiled into the test image. Without it dotnet test rebuilds in
+                // Debug, whose coverable lines differ from the Release build the
+                // integration coverage comes from, so the merged figure was wrong.
                 bat """
                     docker run --rm ^
                         -v "%WORKSPACE%\\testresults:/testresults" ^
                         %IMAGE_NAME%:%TEST_IMAGE_TAG% ^
-                        dotnet test --filter "Category!=Integration" ^
+                        dotnet test -c Release --no-build --filter "Category!=Integration" ^
                             --logger "junit;LogFilePath=/testresults/unit-results.xml" ^
                             --collect:"XPlat Code Coverage" ^
                             --results-directory /testresults
