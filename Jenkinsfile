@@ -166,9 +166,6 @@ pipeline {
         STAGING_PORT    = '8090'
         PROD_PORT       = '8091'
         TEST_PORT       = '8092'
-        // COVERAGE CHANGE - host port for the instrumented coverage run in stage 2.
-        COVERAGE_PORT   = '8093'
-
         // COVERAGE CHANGE - coverage gate thresholds, in percent.
         // Measured baseline when introduced (1 Oct 2026, unit + integration merged):
         // line 7.8, branch 6.5, Maps context 69.9. The suite tests the Maps bounded
@@ -380,7 +377,6 @@ pipeline {
                     docker rm -f robot-cov-app 2>nul
                     docker run -d --name robot-cov-app ^
                         --network robot-test-net ^
-                        -p %COVERAGE_PORT%:8080 ^
                         -v "%WORKSPACE%\\testresults:/testresults" ^
                         -w /src/bin/Release/net8.0 ^
                         -e ASPNETCORE_ENVIRONMENT=Staging ^
@@ -397,17 +393,18 @@ pipeline {
                             "dotnet RobotControllerApi.dll"
                 """
 
+                // No host port: the container is reached only on the test network,
+                // so it cannot collide with anything published on the host. The
+                // health probe runs inside it, with the SDK image's own curl. -s without -S keeps
+                // stderr empty, which the powershell step would treat as an error.
                 powershell '''
-                    $url = "http://localhost:$env:COVERAGE_PORT/health"
                     $ok = $false
                     for ($i = 0; $i -lt 30; $i++) {
-                        try {
-                            $r = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5
-                            if ($r.StatusCode -eq 200) { $ok = $true; break }
-                        } catch { }
+                        docker exec robot-cov-app curl -fs http://localhost:8080/health | Out-Null
+                        if ($LASTEXITCODE -eq 0) { $ok = $true; break }
                         Start-Sleep -Seconds 5
                     }
-                    if (-not $ok) { Write-Error "Instrumented API never became healthy at $url"; exit 1 }
+                    if (-not $ok) { Write-Error "Instrumented API never became healthy"; exit 1 }
                     Write-Host "Instrumented API healthy after $($i * 5)s"
                 '''
 
